@@ -373,3 +373,44 @@ round-trip), confirm green, then `git add -A && git commit -m "phase-0 spike: ne
   Phase 4 — SPA migration `centrifuge-js` → `@microsoft/signalr`,
   INTEGRATION.md rewrite against the frozen v1 contract; then Phase 5
   deploy compose (Caddy edge) + decommission the wall.
+
+**Follow-up 14 — 2026-11-07 (Phase 4 redirected: client libraries):**
+- Owner decision: **NO SPA migration** (`../centrifugo` SPA stays) — Phase 4
+  becomes client libraries for easy connection to this microservice, all
+  behind Cloudflare → every lane must customize the User-Agent (never
+  SDK-default bot-suspicious identities). Three libraries, in-repo:
+  `clients/ts` consumer + `clients/dotnet`/`clients/python` publishers
+  (owner's role split: JS consumes, .NET/Python publish). Token plumbing
+  rides `ar-auth-client-(js/dotnet/python)` — libs take factories/adapters,
+  never mint IdP credentials themselves.
+- `clients/ts` — `@adolf94/realtime-client` (commit `a8e25ed`): hub
+  subscription wrapper; `options.headers` verified in the installed
+  @microsoft/signalr source (merged LAST on negotiate, forwarded to the ws
+  constructor) so Node lanes override the stock UA on BOTH negotiate and WS;
+  browsers keep the native UA + `X-SignalR-User-Agent` override
+  (CORS `AllowAnyHeader` already permits it). Envelope router (type-routed
+  handlers + onAny + unknown-frame ignore + subscriber-exception
+  containment), tokenFactory re-invoked per reconnect; conformance 12 gates.
+- `clients/dotnet` — `Ar.Realtime.Client` 0.1.0-local (packed to the local
+  feed): full publisher surface (`IRealtimePublisher`), envelopes as
+  `JsonObject` w/ client-side `data.type` enforcement, `RealtimeApiException`
+  mapping the error envelope verbatim (429 carries `RetryAfterSeconds`),
+  `ArAuthAccessTokenProvider` wraps `Ar.Auth.OpenId.ClientCredentialsAsync`
+  (cached until ExpiresIn−60 s). xunit conformance 8/8 via the harness.
+- **Server fix surfaced by the suite**: `GroupRegistry.Create` always
+  returned `created=true` (`GetOrAdd` bool never captured) — e2e mock/real
+  lanes re-verified green after the fix (mock 54/54, real 42/42).
+- `clients/python` — `ar-realtime-client` (uv project, httpx): publisher
+  mirrors dotnet; `ar_auth-coupled` `ArAuthTokenProvider` accepts any
+  client_credentials-shaped object (lazy) — pypi `ar-auth-client` does NOT
+  exist so the sibling SDK is an editable-install / factory decision for
+  the consumer, never a hard dep. Conformance 8/8 via the harness.
+- Harness: `dev/test-clients.sh [ts|dotnet|python]` — boots the mock lane
+  then runs each lib's suite against it (self-skipping tests stay green
+  without a stack).
+- Deferred/doc note: the INTEGRATION.md rewrite (original Phase 4 item) is
+  pending — docs are under live owner condensation; a client-libraries
+  pointer landed in README instead.
+- Next: Phase 5 — deploy compose + Caddy single route; decommission the
+  wall. (Owner WIP in the tree right now: fence origin-check edits + docs
+  condensation — do not disturb.)

@@ -59,8 +59,11 @@ if $wantDotnet; then
   (cd "$REPO_ROOT/clients/dotnet" &&
     SRV="$SRV_URL" MOCK_AUTH="http://localhost:9001" dotnet test tests/Ar.Realtime.Client.Tests -v minimal) || overall=1
 fi
-# python conformance lands in its own follow-up (clients/python); the server
-# is left running for it while iterated.
+if $wantPython; then
+  echo "── clients/python ────────────────────────────"
+  (cd "$REPO_ROOT/clients/python" &&
+    SRV="$SRV_URL" MOCK_AUTH="http://localhost:9001" uv run --extra dev pytest tests -q) || overall=1
+fi
 
 stop_stack
 exit $overall

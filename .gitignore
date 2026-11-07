@@ -12,3 +12,7 @@ clients/ts/dist/
 clients/ts/package-lock.json
 clients/dotnet/bin/
 clients/dotnet/obj/
+clients/python/.venv/
+__pycache__/
+clients/python/.venv/
+uv.lock

@@ -9,6 +9,11 @@ Replaces the Centrifugo + proxy-wall stack. Design + decisions:
 
 ## Start here
 
+* **Client libraries** (`clients/`, Phase 4): TypeScript consumer
+  (`@adolf94/realtime-client` — hub subscription, Cloudflare-safe UA) ·
+  .NET publisher (`Ar.Realtime.Client` — local NuGet feed, 0.1.0-local) ·
+  Python publisher (`ar-realtime-client`, editable install). Conformance:
+  `bash dev/test-clients.sh [ts|dotnet|python]`.
 * **`docs/CONTRACT.md`** — the frozen API wire contract (v1) + schema
   snapshot `docs/openapi-v1.json`; live doc at `/openapi/v1.json`.
 * **`docs/INTEGRATION.md`** — client/backend-facing wire contract: how SPAs,
