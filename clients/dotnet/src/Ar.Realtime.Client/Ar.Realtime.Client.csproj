@@ -9,6 +9,9 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <PackageReference Include="Ar.Auth.OpenId" Version="1.2.0-local" />
+    <!-- 1.2.1 = published GitHub Packages artifact (adolf94/ar-oauth2) — same
+         source tree as the former 1.2.0-local pin, same lineage CI stages
+         into the auth-feed (publish workflow) or ../local-nuget (dev). -->
+    <PackageReference Include="Ar.Auth.OpenId" Version="1.2.1" />
   </ItemGroup>
 </Project>

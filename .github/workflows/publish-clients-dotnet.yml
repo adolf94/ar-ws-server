@@ -30,6 +30,32 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
+      # The client depends on Ar.Auth.OpenId (pin: published 1.2.1). The repo
+      # NuGet.config's local-nuget source is a dev-only absolute path, so CI
+      # generates its own config here: nuget.org + a feed staged from the
+      # published GitHub Packages artifact (same fetch as the server build).
+      - name: Stage auth feed (Ar.Auth.OpenId from GitHub Packages)
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          version="1.2.1"
+          mkdir -p auth-feed
+          curl --fail-with-body --show-error --silent --location \
+               -u "adolf94:${TOKEN}" -H 'Accept: application/octet-stream' \
+               "https://nuget.pkg.github.com/adolf94/download/ar.auth.openid/${version}/ar.auth.openid.${version}.nupkg" \
+               -o "auth-feed/Ar.Auth.OpenId.${version}.nupkg"
+          cat > NuGet.config <<'XML'
+          <configuration>
+            <packageSources>
+              <clear />
+              <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
+              <add key="auth-feed" value="auth-feed" />
+            </packageSources>
+          </configuration>
+          XML
+        working-directory: clients/dotnet
+
       - name: Pack
         run: |
           set -euo pipefail
