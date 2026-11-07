@@ -38,7 +38,7 @@ jobs:
           target="nuget-feed/Ar.Auth.OpenId.${AR_AUTH_OPENID_VERSION}.nupkg"
           if ! curl --fail-with-body --show-error --silent --location \
                -u "adolf94:${TOKEN}" -H 'Accept: application/octet-stream' \
-               "https://nuget.pkg.github.com/adolf94/download/ar.auth.openid/${AR_AUTH_OPENID_VERSION}" \
+               "https://nuget.pkg.github.com/adolf94/download/ar.auth.openid/${AR_AUTH_OPENID_VERSION}/ar.auth.openid.${AR_AUTH_OPENID_VERSION}.nupkg" \
                -o "$target"; then
             echo "::error::Could not fetch Ar.Auth.OpenId ${AR_AUTH_OPENID_VERSION} from nuget.pkg.github.com/adolf94."
             echo "::error::GITHUB_TOKEN cannot read packages of another repo by default: open the Ar.Auth.OpenId package page (Settings) and grant adolf94/ar-ws-server read access, or store a classic PAT with read:packages as a secret and pass it in TOKEN."
