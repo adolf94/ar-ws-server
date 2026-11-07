@@ -55,7 +55,8 @@
 - [ ] Phase 2: broadcast, presence, info endpoints; full contract + OpenAPI
 - [ ] Phase 3: history ring buffer, metrics, rate limiting, Dockerfile
 - [ ] Phase 4: SPA migration (`centrifuge-js` → `@microsoft/signalr`),
-  INTEGRATION.md rewrite
+  INTEGRATION.md rewrite (nucleus written: `docs/INTEGRATION.md`, phase-0
+  contract — extend as Phases 1–3 land)
 - [ ] Phase 5: deploy compose + Caddy single route; decommission the wall
 
 ---

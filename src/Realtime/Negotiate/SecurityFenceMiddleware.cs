@@ -1,3 +1,4 @@
+using System.Security.Claims;
 using System.Text;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Authentication;
@@ -29,6 +30,16 @@ public sealed class SecurityFenceMiddleware(RequestDelegate next, IConnectionTok
 
     public async Task InvokeAsync(HttpContext context)
     {
+        // TEMP spike diagnostics: every /realtime/hub request logged at dispatch
+        if (context.Request.Path.StartsWithSegments("/realtime/hub"))
+        {
+            logger.LogInformation("fence dispatch: {Method} {Path} negotiatePath={IsNegotiatePath} isWs={IsWs}",
+                context.Request.Method,
+                context.Request.Path,
+                context.Request.Path == $"{HubPath}/negotiate",
+                context.WebSockets.IsWebSocketRequest);
+        }
+
         if (HttpMethods.IsPost(context.Request.Method) && context.Request.Path == $"{HubPath}/negotiate")
         {
             await HandleNegotiate(context);
@@ -112,7 +123,14 @@ public sealed class SecurityFenceMiddleware(RequestDelegate next, IConnectionTok
             return;
         }
         context.User = connAuth.Principal!;
-        logger.LogDebug("hub handshake: connection token verified for user={User}", connAuth.Principal!.GetSubject());
+        var principal = connAuth.Principal!;
+        var claimDump = string.Join(" | ", principal.Claims.Select(c => $"{c.Type}={(c.Value.Length <= 24 ? c.Value : c.Value[..24] + "..")}"));
+        logger.LogInformation(
+            "hub handshake: connection token verified; identity.Name={Name} nameId={NameId} rawSub={RawSub}; claims=[{Claims}]",
+            principal.Identity?.Name,
+            principal.FindFirstValue(ClaimTypes.NameIdentifier),
+            principal.FindFirstValue("sub"),
+            claimDump);
         await next(context);
     }
 

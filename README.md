@@ -9,6 +9,9 @@ Replaces the Centrifugo + proxy-wall stack. Design + decisions:
 
 ## Start here
 
+* **`docs/INTEGRATION.md`** — client/backend-facing wire contract: how SPAs,
+  mobile, and app backends connect and publish. Phase-4 style guide, current
+  as of the phase-0 spike.
 * **`docs/TECH.md`** — architecture, trust model, components, configuration,
   running/testing, roadmap. This is the technical entry point.
 * **`TODO.md`** — live status: what's done, in progress, next up.
