@@ -7,3 +7,6 @@ node_modules/
 .idp-token-cache.json
 dev/mock-idp/keys/
 nuget-feed/
+clients/ts/node_modules/
+clients/ts/dist/
+clients/ts/package-lock.json
