@@ -37,7 +37,8 @@ jobs:
           PACKAGE_VERSION: ${{ inputs.version }}
 
       - name: Install
-        run: npm ci
+        # repo convention: the lockfile is gitignored — npm install, not ci
+        run: npm install
         working-directory: clients/ts
 
       - name: Build
