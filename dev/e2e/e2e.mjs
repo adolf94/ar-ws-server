@@ -78,7 +78,11 @@ if (process.env.IDP_TOKEN) {
   tokenSource = 'env IDP_TOKEN — authority NOT touched';
 } else if (existsSync(CACHE_FILE)) {
   const cache = JSON.parse(readFileSync(CACHE_FILE, 'utf8'));
-  if (tokenUsable(cache.claims)) {
+  // a cached token is only usable for the CURRENT authority (mock vs real
+  // have different issuers — never reuse one lane's token on the other)
+  const authority = (process.env.AUTH_AUTHORITY ?? '').replace(/\/?$/, '');
+  const issuerMatches = authority === '' || String(cache.claims?.iss ?? '').startsWith(authority);
+  if (tokenUsable(cache.claims) && issuerMatches) {
     idpToken = cache.access_token;
     tokenSource = `cache (.idp-token-cache.json) — authority NOT touched (sub=${cache.claims.sub})`;
   }
@@ -157,6 +161,38 @@ check('WS-4. publication received over the hub (from/sent_at stamped)',
   `received=${JSON.stringify(received)}`);
 
 const secondReceived = null; // a second audience check (same group bus) — Phase-1 territory, skipped in the spike
+
+// ── partition isolation (plan R4) ────────────────────────────────────────────
+if (MODE === 'mock') {
+  // cross-partition publish: a DIFFERENT client_id's token must reach
+  // NOTHING on our connection even for an identical group name.
+  received = null;
+  const otherToken = await mintMock({ sub: '42', scope: PUBLISHER_SCOPE, client_id: 'other-service' });
+  const crossRes = await fetch(`${SRV}/api/publish`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${otherToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group: 'demo', data: { type: 'chat_receive', message_id: 'spk-2', text: 'cross-partition must not land' } }),
+  });
+  const crossBody = await crossRes.json().catch(() => ({}));
+  check('PART-1. cross-partition publish → 200 + reply is opaque',
+    crossRes.status === 200 && crossBody.ok === true && crossBody.partition !== undefined,
+    `status=${crossRes.status} partition=${crossBody.partition ?? '?'}`);
+  await sleep(800);
+  check('PART-2. no leak: publication stayed inside its partition', received === null,
+    received !== null ? `received=${JSON.stringify(received)}` : 'nothing received (correct)');
+
+  // positive control: same-partition publish still arrives
+  const ownRes = await fetch(`${SRV}/api/publish`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${idpToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group: 'demo', data: { type: 'chat_receive', message_id: 'spk-3', text: 'same partition' } }),
+  });
+  const ownBody = await ownRes.json().catch(() => ({}));
+  check('PART-3. same-partition publish → 200 ok', ownRes.status === 200 && ownBody.ok === true, `status=${ownRes.status}`);
+  await sleep(800);
+  check('PART-4. same-partition publication received', received?.message_id === 'spk-3',
+    `received=${JSON.stringify(received)}`);
+}
 
 await connection.stop();
 

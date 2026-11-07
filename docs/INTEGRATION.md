@@ -1,9 +1,9 @@
 # INTEGRATION — connecting clients & app backends to the realtime server
 
 Who this is for: SPA/mobile maintainers wiring the *bus* onto this service,
-and app-backend maintainers *publishing* events through it. The full wire
-contract below is the **phase-0 subset** — endpoints still to come are marked
-⬜ and reserved in plan §5.3 (`../centrifugo/docs/PLAN-OWN-SERVER.md`).
+and app-backend maintainers *publishing* events through it. The wire contract
+below is the **phase-0 subset** — endpoints still to come are marked ⬜ and
+reserved in plan §5.3 (`../centrifugo/docs/PLAN-OWN-SERVER.md`).
 
 Supporting docs: `docs/TECH.md` (how the server is built) · `README.md` ·
 plan §5.2 (trust model) · §5.3 (target API contract).
@@ -17,229 +17,204 @@ browser / mobile (read-only) ──► POST /realtime/hub/negotiate  (IdP Bearer
                                   ◄ { connectionId, accessToken, … }
                               ──► GET  /realtime/hub (WS upgrade; conn token
                                                    via ?access_token or header)
-                                  ◄ SignalR "event" messages — clients never publish
+                                  ◄ SignalR "event" messages
 
 app backend (publisher) ─────► POST /api/publish (IdP Bearer + publisher scope)
                                   ◄ { ok: true, group }
 ```
 
-## 2 · Trust mechanics — what you see, what you never see
+## 2 · Trust mechanics
 
-* Your **IdP access token travels only in HTTP headers** — negotiate is a
-  fetch, so headers are allowed. It never goes into a URL or a WS query
-  string.
-* The negotiate response body contains an `accessToken` field injected by
-  the server: a short-lived **connection JWT** (HS256, `{ sub, client_id,
-  scope, iat, jti }`, ≤ 5 min). The SignalR client hands it to the WS
-  handshake automatically — **your code never touches this token**.
-* On every reconnect the whole cycle repeats (fresh IdP token → fresh
-  negotiate → fresh connection JWT). Therefore:
-  ∙ supply the IdP token via `accessTokenFactory` (JS) / `AccessTokenProvider`
-  (.NET) so it's re-evaluated per connect,
-  ∙ **never set `skipNegotiation: true`** — negotiate is the auth entry door.
-* The connection JWT is checked at handshake time only; a connection stays
-  **alive past its 5-min token TTL** — expiry is a *reconnect* concern, not a
-  mid-session kill. Rotating `CONN_TOKEN_SECRET` (ops) does force everyone
-  through a fresh negotiate.
-* Identity for fan-out purposes = the verified IdP `sub` claim. Your token's
-  `client_id` determines per-service scoping (⬜ Phase 1 — publish targets
-  bare group names today).
+* Your **IdP access token travels only in HTTP headers**. It never goes into a
+  URL or a WS query string.
+* The negotiate response contains an `accessToken` injected by the server: a
+  short-lived **connection JWT** (HS256, `{ sub, client_id, scope, iat, jti }`,
+  ≤ 5 min). The SignalR client passes it to the WS handshake automatically;
+  your code never touches it.
+* Every reconnect repeats the whole cycle (fresh IdP token → negotiate → fresh
+  connection JWT). Therefore:
+  * supply the IdP token via `accessTokenFactory` (JS) / `AccessTokenProvider`
+    (.NET) so it is re-evaluated per connect;
+  * **never set `skipNegotiation: true`** — negotiate is the auth entry point.
+* **Connect-time group placement** (hub, after the fence validates): the
+  connection joins `user_channel|{sub}` — a cross-service channel reachable
+  regardless of `client_id` (send side lands with Phase 2 unicast) — plus the
+  partition-scoped `demo` group (spike-only until Phase 1 membership).
+* The connection JWT is checked only at handshake time. A connection stays
+  alive past its 5-min TTL; expiry triggers a reconnect, not a mid-session kill.
+* Identity for fan-out = the verified IdP `sub` claim **partitioned by your
+  token's `client_id`**: user identity AND group names are per-service
+  namespaces — the same human's tokens from two services are two disjoint
+  fan-out addresses, and publishes never reach outside the caller's
+  partition (plan R4). Membership scoping lands ⬜ Phase 1.
 
-## 3 · Bus client (SPA) — verified recipe
+## 3 · Bus client (SPA)
 
-Dependencies: `@microsoft/signalr` (^10). Verified by the e2e
-(`dev/e2e/e2e.mjs`, 6/6 PASS — shape (a) is the settled negotiate contract).
+Dependency: `@microsoft/signalr` (^10).
 
-### 3.1 · The code (SDK path — what you should ship)
+### 3.1 · The code (SDK path)
 
 ```js
 import { HubConnectionBuilder, LogLevel } from '@microsoft/signalr';
 
-const idpToken = /* your IdP access token (with any needed scopes) */;
-
 const connection = new HubConnectionBuilder()
   .withUrl('https://realtime.example/realtime/hub', {
-    accessTokenFactory: () => idpToken,       // re-invoked per (re)connect
+    accessTokenFactory: () => getIdpAccessToken(), // re-invoked per (re)connect
   })
   .withAutomaticReconnect()
   .configureLogging(LogLevel.Warning)
   .build();
 
 // The bus delivers every publication as method "event". Identity lives in
-// data.type; from/sent_at are stamped server-side. IGNORE unknown types.
+// data.type; from/sent_at are stamped server-side. Ignore unknown types.
 connection.on('event', (data) => {
   switch (data.type) {
     case 'chat_receive': renderChat(data.from, data.sent_at, data.text); break;
     // case 'ai_emission': …
-    default: break;                            // forward-compat: skip silently
+    default: break; // forward-compat: skip unknown types
   }
 });
 
 await connection.start();
 ```
 
-The SDK performs the entire sequence in §3.2 for you. What you must provide:
-the factory returning the *IdP* token, and `on('event', …)` handlers.
+You provide the factory returning the *IdP* token and the `on('event', …)`
+handlers. The SDK handles negotiate and connect.
 
-### 3.2 · The wire — negotiate, then hub (for debugging / non-SDK ports)
+### 3.2 · The wire (for debugging / non-SDK ports)
 
-**Step 1 — negotiate** (this is how the client uses negotiate):
+**Step 1 — negotiate:**
 
 ```http
 POST /realtime/hub/negotiate?negotiateVersion=1 HTTP/1.1
 Authorization: Bearer <IdP access token>
 Content-Type: application/x-www-form-urlencoded
-
-(SignalR's standard negotiate form body — the auth that matters is the header)
 ```
 
-Response `200` (shape (a) — verified):
+Response `200`:
 
 ```json
 {
   "connectionId": "zf8FcCYCEjd_Tj1iS2KyEQA==",
   "connectionToken": "…",        // opaque; used by the URL below
   "negotiateVersion": 1,
-  "accessToken": "<conn JWT>",   // ← injected by OUR fence (§2), not by SignalR
-  "availableTransports": [ { "transport": "WebSockets", … } ]  // WS-only fork
+  "accessToken": "<conn JWT>",   // injected by the fence (§2), not by SignalR
+  "availableTransports": [ { "transport": "WebSockets", … } ]  // WS-only
 }
 ```
 
-Tokenless/malformed → `401 {"error":"invalid_token"}`. The `accessToken`
+Tokenless or malformed → `401 {"error":"invalid_token"}`. The `accessToken`
 differs from the IdP token and carries `{ sub, client_id, scope, iat, jti }`.
 
-**Step 2 — connect via the hub**: the client opens a WebSocket to
-`/realtime/hub?id=<connection-token>`, the SDK appends `?access_token=`
-(the connection JWT — browser WS cannot set headers; the fence accepts it
-on the hub path only, or as an `Authorization: Bearer` header for native
-transports). The fence validates it against the in-process HS256 key, then
-the SDK sends the SignalR handshake frame (`{"protocol":"json","version":1}`)
-and the connection is live as that user (`sub`). After that it's a normal
-SignalR connection: the server invokes `"event"`; clients invoke **nothing**.
+**Step 2 — connect:** the client opens a WebSocket to
+`/realtime/hub?id=<connection-token>`. The SDK appends `?access_token=` with the
+connection JWT (browsers cannot set WS headers; the fence accepts it on the hub
+path, or as an `Authorization: Bearer` header for native transports). The fence
+validates it against the in-process HS256 key, then the client sends the
+SignalR handshake frame (`{"protocol":"json","version":1}`) and the connection
+is live as that user (`sub`). After that the server invokes `"event"`; clients
+invoke nothing.
 
-**Reconnects** (`withAutomaticReconnect`): do nothing special — every attempt
-re-negotiates first (factory re-invoked → fresh IdP token → fresh conn JWT).
-Never cache a connection JWT across reconnects.
+**Reconnects** (`withAutomaticReconnect`): nothing special is needed — every
+attempt re-negotiates first. Never cache a connection JWT across reconnects.
 
 ### 3.3 · Groups today
 
-Every connection auto-joins group `demo` (phase-0 convenience; a bare
-publish→receive path). Real membership lands in Phase 1 — the target
-pattern is your *app backend* calling group-add right after the client
-connects (§4.2) — no subscription budget, no shaping channel.
+Every connection auto-joins group `demo` (phase-0 convenience). Real membership
+lands in Phase 1 (see §4.2). Do not build against `demo`.
 
 ## 4 · App backend (publisher)
 
 Auth for every write: `Authorization: Bearer <IdP token>` whose token carries
-the publisher scope — default `api://ws-server/app:publisher` (`PUBLISH_REQUIRED_SCOPE`).
-Your backend holds **zero realtime secrets**; any scope-bearing M2M token works.
+the publisher scope — default `api://ws-server/app:publisher`
+(`PUBLISH_REQUIRED_SCOPE`). The backend holds **zero realtime secrets**; any
+scope-bearing M2M token works.
 
-### 4.1 · Send-target matrix (what exists, what's coming)
+### 4.1 · Send-target matrix
 
 | # | Send target | Endpoint | Status |
 |---|---|---|---|
-| 1 | To one group | `POST /api/publish { group, data }` | ✅ today (e2e-verified) |
+| 1 | To one group | `POST /api/publish { group, data }` | ✅ today |
 | 2 | To several groups | `POST /api/broadcast { groups[], data }` | ⬜ Phase 2 |
 | 3 | Put user into a group | `POST /api/groups/{g}/members { user_id }` | ⬜ Phase 1 |
 | 4 | Remove user from group | `DELETE /api/groups/{g}/members?user_id=…` | ⬜ Phase 1 |
-| 5 | Send to one user (all their connections) | `POST /api/users/{sub}/send { data }` | ⬜ **not yet in plan §5.3** — needs adding (see note) |
-| 6 | Send to one connection | `POST /api/connections/{id}/send { data }` | ⬜ **not yet in plan §5.3** — needs adding (see note) |
-| 7 | Disconnect a connection | `POST /api/connections/{id}/disconnect` | ⬜ Phase 2 (in plan §5.3) |
+| 5 | Send to one user (all their connections) | — | ⬜ no endpoint planned |
+| 6 | Send to one connection | — | ⬜ no endpoint planned |
+| 7 | Disconnect a connection | `POST /api/connections/{id}/disconnect` | ⬜ Phase 2 |
 
-Live semantics once received (fan-out primitives, server-side):
+Fan-out semantics, server-side:
 
 * **group** → every connection currently in that group, *including other
-  devices of the same user* (group fan-out has no per-user exclusion — that's
-  by design).
-* **user** (`Clients.User(sub)`, plan R5) → *all* live connections of that
-  user — the replacement for the old `user:` reserved channel: one send
-  reaches every device, tab, and reconnect instance.
-* **connection** (`Clients.Client(id)`) → exactly one socket.
+  devices of the same user*, **inside the caller's `client_id` partition** —
+  partition isolation is enforced physically (the publish lands on the
+  caller's namespaced group key, which no other service's connection joins).
+* **user** (`Clients.User`) → all live connections named by that user identity
+  — and identities are partitioned too: the fan-out address is
+  `(client_id, sub)`, so user sends never cross service boundaries.
+* **connection** (`Clients.Client(id)`) → exactly one socket. Connection ids
+  are opaque; they already belong to exactly one partition by construction.
 
-Delivery is **once per connected receiver, at send time** — there is no
-store-and-forward: a receiver offline mid-send misses that event (the
-history buffer, ⬜ Phase 3, is the late-join/late-receive fix, opt-in per
-group).
+Delivery is **once per connected receiver, at send time**. There is no
+store-and-forward: a receiver offline during a send misses that event. The
+history buffer (⬜ Phase 3, opt-in per group) is the late-join fix.
 
-> **Contract gap (owner decision pending):** plan §5.3 only routes
-> publish/broadcast/members/presence/history/disconnect. Targets #5/#6
-> (send-to-user, send-to-connection) are wired server-side
-> (`Clients.User` / `Clients.Client`) but have **no planned HTTP endpoint**.
-> If you need them from an app backend, ask for `/api/users/{sub}/send` and
-> `/api/connections/{id}/send` to be added to §5.3 before Phase 2 work
-> starts — otherwise unicast stays hub-internal.
+### 4.2 · Groups — how a client ends up in one
 
-### 4.2 · Groups — how a client ends up in one (and how you put it there)
-
-Two mechanics (the second is the target model):
-
-1. **today (phase 0):** every connection auto-joins `demo`.
+1. **Today (phase 0):** every connection auto-joins `demo`.
 2. **⬜ Phase 1 (target):** your backend calls `POST /api/groups/{g}/members`
-   with the client's `sub` (from the token it issued for them, or echoed from
-   the connect record) right after the client connects; remove on demand via
-   #4. Membership is keyed by user id, so the add applies to *all* of that
-   user's current sockets — and after each reconnect the backend simply
-   re-applies the group-adds (connect-time membership is the model; there is
-   no group memory in the server to rely on).
+   with the client's `sub` right after the client connects; remove with #4.
+   Membership is keyed by user id, so the add applies to all of that user's
+   current sockets. After each reconnect the backend re-applies the group-adds;
+   the server keeps no group memory to rely on.
 
-Do **not** build against `demo`. Group names are free-form strings today;
-per-service scoping by `client_id` (plan R4) lands alongside Phase 1.
+Group names are free-form strings today; each lives inside the caller's
+`client_id` partition (see §2), so different services' identical names
+never collide and one service cannot publish into another's groups.
 
 ### 4.3 · Envelope rules
 
-* Put the event's identity in `data.type`. The server stamps `from`
-  (your token's `client_id` — do not send your own) and `sent_at`
-  (RFC 3339 UTC; overwritten regardless of what you send).
+* Put the event's identity in `data.type`. The server stamps `from` (your
+  token's `client_id` — do not send your own) and `sent_at` (RFC 3339 UTC;
+  overwritten regardless of what you send).
 * Responses: `200 {ok:true, group}` ·
   `400 {error:"group_required"|"data_required"|"data_invalid", detail}` ·
   `401 {error:"invalid_token"}` · `403` (valid bearer, wrong scope).
-  Real status codes — no `202`-with-error semantics like the old wall.
-* **Unknown group today = `200 ok` delivered to zero subscribers** — SignalR
-  keeps no persistent group registry, so a publish to an unknown/empty group
-  silently reaches nobody. The plan §5.3 "404 if group unknown" arrives with
-  the group service (Phase 1); until then, a typo'd group name fails
-  silently — coordinate group names in the event registry instead of probing.
+* **Unknown group today = `200 ok`, delivered to zero subscribers.** SignalR
+  keeps no persistent group registry, so a publish to an unknown or empty group
+  silently reaches nobody. The "404 if group unknown" behavior arrives with the
+  group service (Phase 1). Until then, a typo'd group name fails silently.
 
 ### 4.4 · CORS / origins
 
-Your SPA's origin must be in the server's `ALLOWED_ORIGINS` (comma list; one
-`*` = one subdomain label, e.g. `https://*.adolfrey.com`). Forbidden origins
-fail at preflight before auth matters. WebSockets-only transport — the old
-long-polling profiles no longer exist, so your proxy must pass WS upgrades.
+Your SPA's origin must be in `ALLOWED_ORIGINS` (comma list; one `*` = one
+subdomain label, e.g. `https://*.adolfrey.com`). Forbidden origins fail at
+preflight before auth is checked. The transport is WebSockets only, so your
+proxy must pass WS upgrades.
 
 ## 5 · Mobile / native clients (.NET today; Swift/Java later)
 
-Native transports can set headers, so the same flow works without any URL
-token: call negotiate yourself, or — since `?access_token=` is also honored
-on the hub path — `HttpConnection`'s `AccessTokenProvider` and let the
-library negotiate; the fence accepts the connection JWT from the header too
-(`docs/TECH.md` §2).
+Native transports can set headers, so the same flow works without a URL token.
+Either call negotiate yourself, or pass `HttpConnection`'s `AccessTokenProvider`
+and let the library negotiate. The fence accepts the connection JWT from the
+header as well as `?access_token=` (`docs/TECH.md` §2).
 
 ## 6 · Things to avoid
 
-1. Never send the IdP token in a URL, WS query string, or header
-   other than the negotiate `Authorization` — trust boundaries depend on it.
-2. Never mock the fence by calling the WS path directly — tokenless
-   handshakes get `401` by design.
+1. Never send the IdP token in a URL, a WS query string, or any header other
+   than the negotiate `Authorization` — the trust boundary depends on it.
+2. Never mock the fence by calling the WS path directly — tokenless handshakes
+   get `401` by design.
 3. Don't `skipNegotiation`, don't disable the automatic re-negotiation cycle,
-   and don't build your app around the `demo` auto-join (phase-0 only).
-4. Don't log or store connection JWTs on the client side — they're worthless
-   after ≤ 5 min and the next negotiate mints a fresh one anyway.
-5. No `access_token` minting endpoint exists — the old
-   `POST /realtime/token` is gone (decided in plan §5.2). If you need a
-   server-side token, that's an IdP contract, not this service's job.
-6. Clients never publish — there is no hub method to invoke, no client→server
-   frames, ever. Every write goes through `/api/*` with a scope check.
+   and don't build on the `demo` auto-join.
+4. There is no hub method to invoke and no client→server frame. Every write
+   goes through `/api/*` with a scope check.
 
-## 7 · Operate quickly (self-host check)
+## 7 · Environment knobs for integrators
 
-```bash
-bash dev/run-spike.sh                  # real IdP; e2e 6/6 gate
-IDP_MODE=mock bash dev/run-spike.sh    # offline lane
-```
+* `ALLOWED_ORIGINS` — CORS allow-list (§4.4).
+* `AUTH_AUTHORITY` (+ `AUTH_AUDIENCE` to pin `aud`) — IdP issuer.
+* `PUBLISH_REQUIRED_SCOPE` — publisher scope (§4).
 
-Environment knobs that matter to integrators: `ALLOWED_ORIGINS`,
-`AUTH_AUTHORITY` (+ `AUTH_AUDIENCE` to pin aud), `PUBLISH_REQUIRED_SCOPE`.
-The full table lives in `docs/TECH.md` §5. Server health (`GET /healthz`)
-echoes the effective auth configuration — useful when a browser client gets
-401 at negotiate unexpectedly.
+The full table lives in `docs/TECH.md` §5. `GET /healthz` echoes the effective
+auth configuration — useful when a browser client gets an unexpected 401 at
+negotiate.

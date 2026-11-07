@@ -50,13 +50,20 @@
 - [ ] `dev/run-spike.sh`: `fuser -k <SRV port>` in real mode too (currently
   only the mock-IdP port is cleared; a stale :5000 listener defeats the smoke)
 - [ ] Phase 1 core: registry-driven group membership (connect-time + runtime
-  `POST/DELETE /api/groups/{g}/members` by user id), per-service group
-  scoping `client_id` (plan R4)
+  `POST/DELETE /api/groups/{g}/members` by user id); per-service scoping
+  (plan R4) for groups AND user identities is **already implemented**:
+  `GroupPartitioner` namespaces everything behind the caller's verified
+  `client_id` (`Groups/GroupPartitions.cs`; e2e PART-1..4 gate it) —
+  membership ops just build on the same partition helper
 - [ ] Phase 2: broadcast, presence, info endpoints; full contract + OpenAPI
   — **fold in the plan §5.3 gap surfaced writing `docs/INTEGRATION.md`**:
   add send-to-user (`/api/users/{sub}/send`) and
   send-to-connection (`/api/connections/{id}/send`) to §5.3 (fan-out
   primitives already exist server-side; no HTTP route is planned)
+  → there, design the owner's **global user channel** `user_channel|{sub}`
+  (server auto-join on connect, cross-`client_id` unicast regardless of
+  which service the user is connected through — deferred from the 2026-11-07
+  partitioning session; needs its own scope decision on who may fan out)
 - [ ] Phase 3: history ring buffer, metrics, rate limiting, Dockerfile
 - [ ] Phase 4: SPA migration (`centrifuge-js` → `@microsoft/signalr`),
   INTEGRATION.md rewrite (nucleus written: `docs/INTEGRATION.md`, phase-0
@@ -125,3 +132,29 @@ round-trip), confirm green, then `git add -A && git commit -m "phase-0 spike: ne
 - Diagnostic logs reduced (dispatch → Debug; claim dump → Debug).
 - Next action: `fuser -k 5000/tcp 9001/tcp; bash dev/run-spike.sh` → then
   start Phase 1 group membership work.
+
+**Follow-up 3 — 2026-11-07 (partitioning session):**
+- Designed with owner → **per-service scoping (plan R4) ready for groups
+  AND connections**. `Groups/GroupPartitions.cs` — `IGroupPartitioner`
+  encodes `client_id|logical` (URL-encoded, `|` separator per owner) for
+  group keys; `SubUserIdProvider` yields `client_id|sub` (user namespace per
+  service); hub connect-time placement also joins `user_channel|{sub}`
+  (cross-service global user channel, join now / **send side deferred to the
+  Phase 2 publish work** per owner); `POST /api/publish` is partition-scoped
+  and stamps `partition` in its 200 reply. Reserved-name guard: a token whose
+  `client_id` == `user_channel` is boxed into the `server` partition.
+- e2e grew a partition-gate section (mock lane only — only mock mints two
+  different `client_id`s): PART-1..4 prove cross-partition publish leaks
+  nothing and same-partition delivers. Mock lane **12/12**, real lane **8/8**.
+- Cross-repo fix: `ar-auth` **1.2.0-local** packed — `ArAuthClient` now relaxes
+  `HttpDocumentRetriever.RequireHttps` for `http://` authorities (the mock
+  IdP lane was dead-on-arrival with IDX20108); realtime bumped 1.0.5 → 1.2.0.
+- Infra gotcha: the legacy centrifugo **wall stack's `auth-server` container
+  squats on :9001** — `docker stop auth-server` before the mock lane
+  (restart for the wall).
+- e2e cache check now rejects tokens whose `iss` ≠ current `AUTH_AUTHORITY`
+  (mock vs real lanes are no longer cross-contaminated); `run-spike.sh`
+  exports `IDP_CLIENT_SECRET/SCOPES` so real-mode fresh mint finally works
+  (earlier greens rode on the warm cache).
+- Next action: start Phase 1 — registry-driven group membership ops on the
+  partitioned keys (`POST/DELETE /api/groups/{g}/members` by user id).

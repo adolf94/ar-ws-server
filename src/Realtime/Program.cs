@@ -15,6 +15,7 @@ using Microsoft.IdentityModel.Tokens;
 using Realtime.Api;
 using Realtime.Auth;
 using Realtime.Connections;
+using Realtime.Groups;
 using Realtime.Hubs;
 using Realtime.Negotiate;
 
@@ -60,6 +61,7 @@ var connSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(connSecret)
 
 builder.Services.AddSingleton<IConnectionTokenService>(new ConnectionTokenService(connSigningKey, connTokenTtl));
 builder.Services.AddSingleton<IConnectionRegistry, InMemoryConnectionRegistry>();
+builder.Services.AddSingleton<IGroupPartitioner, GroupPartitioner>();   // plan R4 namespaces
 builder.Services.AddSingleton<IUserIdProvider, SubUserIdProvider>();
 builder.Services.AddSingleton<IAuthorizationHandler>(new PublisherScopeHandler(publishScope));
 

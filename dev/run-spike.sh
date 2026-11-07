@@ -48,7 +48,11 @@ if [[ "$IDP_MODE" == "real" ]]; then
   if [[ ! -f "$CENTRIFUGO_ENV" ]]; then echo "real mode needs $CENTRIFUGO_ENV with AUTH_SERVICE_* credentials"; exit 1; fi
   while IFS='=' read -r key value; do
     case "$key" in
-      AUTH_SERVICE_CLIENT_ID|AUTH_SERVICE_CLIENT_SECRET|AUTH_SERVICE_SCOPES) export "$key=$value" ;;
+      # export both the raw AUTH_SERVICE_* names and the e2e-familiar IDP_*
+      # aliases so node e2e.mjs can mint fresh tokens when the cache misses
+      AUTH_SERVICE_CLIENT_ID)    export "$key=$value" IDP_CLIENT_ID="$value" ;;
+      AUTH_SERVICE_CLIENT_SECRET) export "$key=$value" IDP_CLIENT_SECRET="$value" ;;
+      AUTH_SERVICE_SCOPES)       export "$key=$value" IDP_CLIENT_SCOPES="$value" ;;
     esac
   done < "$CENTRIFUGO_ENV"
   E2E_ENV="$E2E_ENV IDP_CLIENT_ID=$AUTH_SERVICE_CLIENT_ID"

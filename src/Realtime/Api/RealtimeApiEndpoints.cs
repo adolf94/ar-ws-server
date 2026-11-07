@@ -7,6 +7,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Primitives;
 using Realtime.Auth;
+using Realtime.Groups;
 using Realtime.Hubs;
 
 namespace Realtime.Api;
@@ -14,7 +15,9 @@ namespace Realtime.Api;
 /// <summary>
 /// The server API (plan §5.3, Phase-0 subset): app backends publish over
 /// plain HTTP with Bearer + publisher scope — real status codes, real JSON
-/// errors (plan R8). Members/presence/history arrive in Phases 1–2.
+/// errors (plan R8). Every request's logical group is scoped to the caller's
+/// <c>client_id</c> partition (plan R4, <see cref="IGroupPartitioner"/>).
+/// Members/presence/history arrive in Phases 1–2.
 /// </summary>
 public static class RealtimeApiEndpoints
 {
@@ -33,7 +36,7 @@ public static class RealtimeApiEndpoints
 
         endpoints.MapPost("/publish",
             [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
-            async (PublishRequest request, HttpContext http, IHubContext<RealtimeHub> hubContext) =>
+            async (PublishRequest request, HttpContext http, IHubContext<RealtimeHub> hubContext, IGroupPartitioner partitioner) =>
             {
                 if (string.IsNullOrWhiteSpace(request.Group))
                     return Results.BadRequest(new { error = "group_required", detail = "body.group is required" });
@@ -45,12 +48,14 @@ public static class RealtimeApiEndpoints
                 if (data is null)
                     return Results.BadRequest(new { error = "data_invalid", detail = "body.data must be a JSON value" });
 
+                var partition = partitioner.PartitionOf(http.User);
+
                 // event convention: identity lives in data.type; provenance stamped on top
                 data["from"] = (string?)http.User.GetClientId() ?? "server";
                 data["sent_at"] = DateTime.UtcNow.ToString("o");
 
-                await hubContext.Clients.Group(request.Group).SendAsync("event", data);
-                return Results.Ok(new { ok = true, group = request.Group });
+                await hubContext.Clients.Group(partitioner.Physical(partition, request.Group)).SendAsync("event", data);
+                return Results.Ok(new { ok = true, group = request.Group, partition });
             });
 
         return endpoints;

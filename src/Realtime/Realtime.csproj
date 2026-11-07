@@ -19,6 +19,6 @@
     <!-- hub-side connection-token scheme (HS256, ?access_token query-or-header) -->
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.0" />
     <!-- IdP token verification: docs/INTEGRATION.md's official IdP client -->
-    <PackageReference Include="Ar.Auth.OpenId" Version="1.0.5-local" />
+    <PackageReference Include="Ar.Auth.OpenId" Version="1.2.0-local" />
   </ItemGroup>
 </Project>

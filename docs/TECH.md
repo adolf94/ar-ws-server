@@ -30,7 +30,9 @@ One container, one process, two doors:
                      └───────────────────────────────────────────────────────────┘
 ```
 
-* **The bus** is a SignalR hub behind a security fence (`§3`).
+* **The bus** is a SignalR hub behind a security fence (`§3`). At connect the
+  hub places every connection into `user_channel|{sub}` (cross-service
+  unicast address; sends arrive in Phase 2) + its partition-scoped groups.
 * **The server API** is a minimal API calling `IHubContext<RealtimeHub>`
   directly — no relay, no injected API key, real HTTP status codes.
 * **There is exactly one secret in the whole system**: the in-process
@@ -69,9 +71,11 @@ Two authentication schemes, by endpoint:
 
 ### Identity inside the hub
 
-* `SubUserIdProvider` → `Context.UserIdentifier` = the verified `sub`.
-  `Clients.User(sub)` fans out to **all connections of that user** (plan R5 —
-  replaces the old `user:` reserved channel entirely).
+* Hub identity = `Context.UserIdentifier` = `partition(client_id)-scoped`
+  `sub` (via `SubUserIdProvider`): the fan-out address space is per-service —
+  the same user's tokens from two services are two disjoint identities, so
+  `Clients.User(sub)` fans out only to connections of *that service's* tokens
+  (plan R5 + R4 on the connection plane).
 * The embedded `client_id` claim keys per-service group scoping (plan R4 —
   membership scoping lands in Phase 2; the registry already tracks users).
 * Hub-side policies read the embedded `scope`.
@@ -111,7 +115,8 @@ misbehaves.
 | `src/Realtime/Auth/ArAccessTokenHandler.cs` | IdP verification scheme (`VerifyTokenAsync`; header-only; `sub` required → no anonymous connections). Also `PublisherScopeRequirement/Handler`. |
 | `src/Realtime/Auth/ConnectionTokenService.cs` | Mints + defines the connection JWT (claims, TTL, HS256 in-process). |
 | `src/Realtime/Auth/PrincipalExtensions.cs` | `GetSubject()` / `GetClientId()` across mapped and raw claim names. |
-| `src/Realtime/Auth/SubUserIdProvider.cs` | `sub` → `Context.UserIdentifier`. |
+| `src/Realtime/Groups/GroupPartitions.cs` | `IGroupPartitioner` — plan R4: encodes `client_id | logical` physical keys for groups AND user identities; every publish, hub join, and `SubUserIdProvider` id goes through it. |
+| `src/Realtime/Auth/SubUserIdProvider.cs` | `sub` → partitioned `Context.UserIdentifier` (`client_id`-scoped user namespace). |
 | `src/Realtime/Connections/ConnectionRegistry.cs` | `IConnectionRegistry` + in-memory impl: `user → connectionIds`. Bridge for user-targeted group ops (used from Phase 2 on). |
 | `src/Realtime/Hubs/RealtimeHub.cs` | WS lifecycle: connect/disconnect registry registration; `data.type` events flow out as methods `event`. **Phase-0 shortcut:** every connection auto-joins group `demo`. |
 | `src/Realtime/Negotiate/SecurityFenceMiddleware.cs` | The fence (§3 above). |
@@ -121,7 +126,10 @@ misbehaves.
 | `dev/e2e/mint-token.mjs` | Refreshes the e2e token cache without running tests. |
 | `dev/run-spike.sh` | Boots (mock|real) stack and runs the e2e. |
 
-Runtime packages: `Ar.Auth.OpenId` 1.0.5-local (local NuGet feed,
+Runtime packages: `Ar.Auth.OpenId` 1.2.0-local (local NuGet feed, from the
+`ar-auth` sibling repo; 1.2.0 fixes http-authority discovery for the mock IdP
+lane — `ArAuthClient` now sets `HttpDocumentRetriever.RequireHttps` based on
+the authority scheme), `Microsoft.AspNetCore.Authentication.JwtBearer` 10.0.0.
 `NuGet.config`), `Microsoft.AspNetCore.Authentication.JwtBearer` 10.0.0.
 SignalR itself ships in the shared framework.
 
@@ -191,7 +199,11 @@ ignore unknown types.
 
 * Group `demo` auto-join on connect is a spike convenience — replaced by
   registry-driven membership (Phase 1).
-* No per-service group scoping yet (plan R4) — publish targets bare names.
+* Per-service group scoping (plan R4) is implemented — `GroupPartitioner`
+  namespaces every logical group (and every user identity) behind the
+  caller's `client_id`; cross-partition publishes are inherently isolated
+  and e2e-gated (PART-1..4, mock mode). Remaining R4 extension: registry
+  membership / group ops land with Phase 1.
 * In-memory registry + root hub logging only: single process, no metrics.
 * The publisher scope lane's 403 negative test runs only in mock mode (the
   real IdP's `speedtest` client carries the publisher scope unconditionally).
