@@ -74,7 +74,7 @@ jobs:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          dotnet nuget add source https://nuget.pkg.github.com/adolf94/index.json \
-            --name github --username adolf94 --password "$TOKEN" --store-password-in-clear-text
+          # the 'github' source is already defined in the generated Config —
+          # push against it by name, api-key doubles as the credential
           dotnet nuget push ./nupkgs/*.nupkg --source github --api-key "$TOKEN" --skip-duplicate
         working-directory: clients/dotnet
