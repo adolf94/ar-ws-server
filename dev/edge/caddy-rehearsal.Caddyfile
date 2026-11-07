@@ -1,0 +1,20 @@
+# Local replica of the central Caddy's apis.adolfrey.com block for the
+# realtime routes (deploy/caddy-route.caddy) — plain HTTP on :8080 (TLS lives
+# at Cloudflare/central-Caddy in prod); the service door is exposed dev-only
+# on :5001 because this rehearsal has no scraper container to ride the docker
+# network.
+#
+# Public surface under rehearsal:  http://localhost:8080/realtime-v2/*
+#   /realtime-v2/realtime/hub* → realtime:5000 /realtime/hub   (canonical)
+#   /realtime-v2/api*          → realtime:5000 /api/*          (canonical)
+#   /realtime-v2/metrics|openapi|healthz → DENIED (404) — internal-only
+#
+http://localhost:8080 {
+	@ops path /realtime-v2/metrics* /realtime-v2/openapi* /realtime-v2/healthz*
+	handle @ops {
+		respond 404
+	}
+	handle_path /realtime-v2/* {
+		reverse_proxy realtime:5000
+	}
+}

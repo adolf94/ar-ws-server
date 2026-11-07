@@ -1,0 +1,67 @@
+# PROD compose for the gh_webhooks deploy target (deploy on the server:
+# /srv/deploy/realtime/ — mirrors the wall's /srv/deploy/ws-server/ shape).
+#
+# ┌ ONE prefix, ONE process (plan §1) — no bus/wall split anymore ────────┐
+#   │ wss://apis.adolfrey.com/realtime-v2/realtime/hub   (bus, negotiate)   │
+#   │ https://apis.adolfrey.com/realtime-v2/api/*        (publisher door)   │
+#   │   caddy (deploy/caddy-route.caddy): one handle_path — the public      │
+#   │   prefix is stripped and the service's canonical paths shine through: │
+#   │   /realtime-v2/realtime/hub → /realtime/hub; /realtime-v2/api/* → /api/*│
+#   │   /metrics + /openapi + /healthz are DENIED at the edge (ops door     │
+#   │   stays on the internal docker network)                               │
+#   └──────────────────────────────────────────────────────────────────────┘
+#
+# The service's /metrics and /openapi/v1.json are deliberately NOT given a
+# public route — operational surface stays on the internal docker door
+# (scraping apps attach to the `realtime` network). Everything public is
+# bearer-fenced+rate-limited by the service itself (docs/CONTRACT.md).
+#
+# Cutover plan (plan §7): run parallel to the wall on THIS new prefix;
+# the wall's /websockets/* routes stay untouched until its consumers move.
+#
+# Flow: GitHub Actions pushes ghcr.io/<owner>/<repo>:<sha> → gh_webhooks runs
+#   IMAGE=<sha> docker compose pull && docker compose up -d --no-deps
+#                             (manual boot: export IMAGE=realtime:latest)
+#
+# Variable source: the sibling `.env` next to this file (compose v2
+# auto-loads it for ${…} interpolation). No top-level `env_file:` —
+# compose schema rejects it; secrets ride explicit maps instead.
+
+services:
+  realtime:
+    image: '${IMAGE:? IMAGE must be set — gh_webhooks does this; manual boot: export IMAGE=…}'
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://0.0.0.0:5000
+      # ── IdP (the REAL authority) ──────────────────────────────────────────
+      AUTH_AUTHORITY: ${AUTH_AUTHORITY:-https://auth.adolfrey.com/api/}
+      AUTH_AUDIENCE: ''                 # empty = issuer-only trust
+      PUBLISH_REQUIRED_SCOPE: api://ws-server/app:publisher
+      # browser fences (WS-hijack + CORS preflight): wildcard = one label
+      ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-http://localhost:3000,https://*.adolfrey.com}
+      # ── in-process connection-token key (the ONLY secret) ────────────────
+      # rotate = live sockets re-negotiate; IdP tokens are unaffected
+      CONN_TOKEN_SECRET: '${CONN_TOKEN_SECRET:? CONN_TOKEN_SECRET must be set — openssl rand -hex 32 (put it in the sibling .env, never commit it)}'
+      CONN_TOKEN_TTL: ${CONN_TOKEN_TTL:-300}
+      # ── §9 rate limiting (fixed window / client_id) ──────────────────────
+      RATE_WINDOW_SECONDS: ${RATE_WINDOW_SECONDS:-60}
+      RATE_MAX_PER_WINDOW: ${RATE_MAX_PER_WINDOW:-60}
+      RATE_SEND_PER_WINDOW: ${RATE_SEND_PER_WINDOW:-600}
+    restart: unless-stopped
+    healthcheck:               # runtime base ships curl (installed in build)
+      test: ['CMD', 'curl', '-sf', 'http://localhost:5000/healthz']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - realtime               # internal door (ops scrape + attaching publisher apps)
+      - proxy                  # the homelab-wide network the central Caddy is on
+      # NO host ports in prod: the edge is the only public road.
+      - proxy                  # the homelab-wide network the CENTRAL Caddy is on
+
+networks:
+  realtime:
+    name: realtime
+  proxy:
+    external: true             # the homelab-wide network the central Caddy is on

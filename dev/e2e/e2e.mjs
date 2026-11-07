@@ -20,6 +20,14 @@ import { HubConnectionBuilder } from '@microsoft/signalr';
 
 const MODE = process.env.IDP_MODE ?? 'real';
 const SRV = process.env.SRV ?? 'http://localhost:5000';
+// EDGE (optional): public prefix when driving the service THROUGH the Caddy
+// edge (deploy/caddy-route.caddy) — e.g. EDGE='/realtime-v2' with a base URL
+// in SRV. Empty = drive the service directly (host/SDN door, no prefix).
+const BASE = `${SRV}${process.env.EDGE ?? ''}`;
+// ops door: /metrics + /openapi are deliberately NOT routed at the edge, so
+// when driving through the edge, SRV_OPS is the service's internal base
+// (defaults to SRV = direct mode where ops and API live on the same base).
+const OPS = process.env.SRV_OPS ?? SRV;
 // cheap consistency gate: the live OpenAPI doc matches the frozen snapshot
 const CONTRACT_FILE = new URL('../../docs/openapi-v1.json', import.meta.url).pathname;
 const MOCK_AUTH = 'http://localhost:9001';
@@ -119,7 +127,7 @@ console.log(`  token: ${tokenSource}`);
 const userClaims = decodeClaims(idpToken);
 
 // ── 2. negotiate fence: 200 + connectionId + OUR accessToken (shape a) ─────
-const negotiateRes = await fetch(`${SRV}/realtime/hub/negotiate?negotiateVersion=1`, {
+const negotiateRes = await fetch(`${BASE}/realtime/hub/negotiate?negotiateVersion=1`, {
   method: 'POST',
   headers: { Authorization: `Bearer ${idpToken}` },
 });
@@ -132,7 +140,7 @@ check('WS-1. negotiate: 200 + accessToken injected (shape a)',
 // ── 3/4/5. the actual WebSocket flow ─────────────────────────────────────────
 let received = null;
 const connection = new HubConnectionBuilder()
-  .withUrl(`${SRV}/realtime/hub`, {
+  .withUrl(`${BASE}/realtime/hub`, {
     accessTokenFactory: () => idpToken, // re-invoked per (re)connect
   })
   .build();
@@ -155,7 +163,7 @@ const memberSub = userClaims.sub; // member's client partition = bearer's client
 // ── send to a specific user (Phase 2 unicast, owner spec) ───────────────────
 // Own-token send: lands via user_channel|{sub}, from = caller's client_id.
 received = null;
-const sendRes = await fetch(`${SRV}/api/users/${encodeURIComponent(memberSub ?? '')}/send`, {
+const sendRes = await fetch(`${BASE}/api/users/${encodeURIComponent(memberSub ?? '')}/send`, {
   method: 'POST', headers: authHdrs,
   body: JSON.stringify({ data: { type: 'notify_receive', message_id: 'snd-1', text: 'direct to user' } }),
 });
@@ -171,7 +179,7 @@ if (MODE === 'mock') {
   // still reaches the user — sub is the only address.
   received = null;
   const otherToken = await mintMock({ sub: '42', scope: PUBLISHER_SCOPE, client_id: 'other-service' });
-  const crossSendRes = await fetch(`${SRV}/api/users/${encodeURIComponent(memberSub ?? '')}/send`, {
+  const crossSendRes = await fetch(`${BASE}/api/users/${encodeURIComponent(memberSub ?? '')}/send`, {
     method: 'POST', headers: { Authorization: `Bearer ${otherToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ data: { type: 'notify_receive', message_id: 'snd-2', text: 'cross-service unicast' } }),
   });
@@ -186,7 +194,7 @@ if (MODE === 'mock') {
 // ── send to a specific CONNECTION (scoped per owner, 2026-11-07) ────────────
 // One live socket: ours (connected above). Own-socket send must deliver.
 received = null;
-const connSendRes = await fetch(`${SRV}/api/connections/${encodeURIComponent(connection.connectionId)}/send`, {
+const connSendRes = await fetch(`${BASE}/api/connections/${encodeURIComponent(connection.connectionId)}/send`, {
   method: 'POST', headers: authHdrs,
   body: JSON.stringify({ data: { type: 'notify_receive', message_id: 'snd-5', text: 'direct to this socket' } }),
 });
@@ -197,7 +205,7 @@ await sleep(800);
 check('SEND-6. per-socket delivery received', received?.message_id === 'snd-5',
   `received=${JSON.stringify(received)}`);
 
-const ghostSend = await fetch(`${SRV}/api/connections/${encodeURIComponent('no-such-connection')}/send`, {
+const ghostSend = await fetch(`${BASE}/api/connections/${encodeURIComponent('no-such-connection')}/send`, {
   method: 'POST', headers: authHdrs,
   body: JSON.stringify({ data: { type: 'notify_receive', text: 'x' } }),
 });
@@ -210,10 +218,10 @@ if (MODE === 'mock') {
   received = null;
   const foreignToken = await mintMock({ sub: '43', scope: PUBLISHER_SCOPE, client_id: 'other-service' });
   const foreignConn = new HubConnectionBuilder()
-    .withUrl(`${SRV}/realtime/hub`, { accessTokenFactory: () => foreignToken })
+    .withUrl(`${BASE}/realtime/hub`, { accessTokenFactory: () => foreignToken })
     .build();
   await foreignConn.start();
-  const foreignSend = await fetch(`${SRV}/api/connections/${encodeURIComponent(foreignConn.connectionId)}/send`, {
+  const foreignSend = await fetch(`${BASE}/api/connections/${encodeURIComponent(foreignConn.connectionId)}/send`, {
     method: 'POST', headers: authHdrs,   // our spa-demo-client token
     body: JSON.stringify({ data: { type: 'notify_receive', message_id: 'snd-6', text: 'must be refused' } }),
   });
@@ -222,19 +230,19 @@ if (MODE === 'mock') {
   await foreignConn.stop();
 }
 
-const sendNoData = await fetch(`${SRV}/api/users/${encodeURIComponent(memberSub ?? '')}/send`, {
+const sendNoData = await fetch(`${BASE}/api/users/${encodeURIComponent(memberSub ?? '')}/send`, {
   method: 'POST', headers: { Authorization: `Bearer ${idpToken}`, 'Content-Type': 'application/json' },
   body: JSON.stringify({}),
 });
 check('GATE-3. send with no data → 400', sendNoData.status === 400, `status=${sendNoData.status}`);
 
-const sendAnon = await fetch(`${SRV}/api/users/${encodeURIComponent(memberSub ?? '')}/send`, {
+const sendAnon = await fetch(`${BASE}/api/users/${encodeURIComponent(memberSub ?? '')}/send`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ data: { type: 'notify_receive', text: 'x' } }),
 });
 check('GATE-3b. unauthenticated send → 401', sendAnon.status === 401, `status=${sendAnon.status}`);
 
-const createRes = await fetch(`${SRV}/api/groups`, {
+const createRes = await fetch(`${BASE}/api/groups`, {
   method: 'POST', headers: authHdrs,
   body: JSON.stringify({ name: 'demo', history: true }),   // Phase 3: opt-in
 });
@@ -244,7 +252,7 @@ check('G-1. POST /api/groups → created/auto client_id partition',
     && typeof createBody.partition === 'string',
   `status=${createRes.status} group=${createBody.group} partition=${createBody.partition ?? '?'}`);
 
-const addRes = await fetch(`${SRV}/api/groups/demo/members`, {
+const addRes = await fetch(`${BASE}/api/groups/demo/members`, {
   method: 'POST', headers: authHdrs,
   body: JSON.stringify({ user_id: memberSub }),
 });
@@ -253,24 +261,24 @@ check('G-2. member add (bearer scopes client_id) → live sockets joined',
   addRes.status === 200 && addResBody.ok === true && addResBody.connections_joined >= 1,
   `status=${addRes.status} joined=${addResBody.connections_joined ?? 0}`);
 
-const delRes = await fetch(`${SRV}/api/groups/demo/members?user_id=${encodeURIComponent(memberSub)}`, {
+const delRes = await fetch(`${BASE}/api/groups/demo/members?user_id=${encodeURIComponent(memberSub)}`, {
   method: 'DELETE', headers: { Authorization: `Bearer ${idpToken}` },
 });
 // remove-then-re-add so the fan-out under test below keeps working
 check('G-3. member remove → ok (evicts live sockets)', delRes.status === 200, `status=${delRes.status}`);
-const reAddRes = await fetch(`${SRV}/api/groups/demo/members`, {
+const reAddRes = await fetch(`${BASE}/api/groups/demo/members`, {
   method: 'POST', headers: authHdrs,
   body: JSON.stringify({ user_id: memberSub }),
 });
 check('G-4. member re-add → ok', reAddRes.status === 200, `status=${reAddRes.status}`);
 
-const noSuchGroup = await fetch(`${SRV}/api/groups/no-such-group/members`, {
+const noSuchGroup = await fetch(`${BASE}/api/groups/no-such-group/members`, {
   method: 'POST', headers: authHdrs,
   body: JSON.stringify({ user_id: memberSub }),
 });
 check('GATE-2b. member add on unknown group → 404', noSuchGroup.status === 404, `status=${noSuchGroup.status}`);
 
-const publishRes = await fetch(`${SRV}/api/publish`, {
+const publishRes = await fetch(`${BASE}/api/publish`, {
   method: 'POST',
   headers: { Authorization: `Bearer ${idpToken}`, 'Content-Type': 'application/json' },
   body: JSON.stringify({ group: 'demo', data: { type: 'chat_receive', message_id: 'spk-1', text: 'hello from phase-0 spike' } }),
@@ -292,7 +300,7 @@ if (MODE === 'mock') {
   // NOTHING on our connection even for an identical group name.
   received = null;
   const otherToken = await mintMock({ sub: '42', scope: PUBLISHER_SCOPE, client_id: 'other-service' });
-  const crossRes = await fetch(`${SRV}/api/publish`, {
+  const crossRes = await fetch(`${BASE}/api/publish`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${otherToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ group: 'demo', data: { type: 'chat_receive', message_id: 'spk-2', text: 'cross-partition must not land' } }),
@@ -306,7 +314,7 @@ if (MODE === 'mock') {
     received !== null ? `received=${JSON.stringify(received)}` : 'nothing received (correct)');
 
   // positive control: same-partition publish still arrives
-  const ownRes = await fetch(`${SRV}/api/publish`, {
+  const ownRes = await fetch(`${BASE}/api/publish`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${idpToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ group: 'demo', data: { type: 'chat_receive', message_id: 'spk-3', text: 'same partition' } }),
@@ -321,13 +329,13 @@ if (MODE === 'mock') {
 // ── broadcast (plan §5.3): one envelope into several groups, all caller-
 // partition-scoped; unknown groups are skipped + reported. ──────────────────
 received = null;
-const bcCreateRes = await fetch(`${SRV}/api/groups`, {
+const bcCreateRes = await fetch(`${BASE}/api/groups`, {
   method: 'POST', headers: authHdrs,
   body: JSON.stringify({ name: 'demo2' }),
 });
 check('BC-0. create demo2 → ok', bcCreateRes.status === 201 || bcCreateRes.status === 200, `status=${bcCreateRes.status}`);
 
-const bcRes = await fetch(`${SRV}/api/broadcast`, {
+const bcRes = await fetch(`${BASE}/api/broadcast`, {
   method: 'POST', headers: authHdrs,
   body: JSON.stringify({ groups: ['demo', 'demo2', 'ghost-group'], data: { type: 'chat_receive', message_id: 'bc-1', text: 'broadcast' } }),
 });
@@ -342,14 +350,14 @@ await sleep(800);
 check('BC-3. broadcast delivered to the connection', received?.message_id === 'bc-1',
   `received=${JSON.stringify(received)}`);
 
-const bcNoGroups = await fetch(`${SRV}/api/broadcast`, {
+const bcNoGroups = await fetch(`${BASE}/api/broadcast`, {
   method: 'POST', headers: authHdrs,
   body: JSON.stringify({ groups: [], data: { type: 'chat_receive', text: 'x' } }),
 });
 check('GATE-5. broadcast with empty groups → 400', bcNoGroups.status === 400, `status=${bcNoGroups.status}`);
 
 // ── GET /api/groups: listing + persisted member counts + live identities ────
-const listRes = await fetch(`${SRV}/api/groups`, { headers: { Authorization: `Bearer ${idpToken}` } });
+const listRes = await fetch(`${BASE}/api/groups`, { headers: { Authorization: `Bearer ${idpToken}` } });
 const listBody = await listRes.json().catch(() => ({}));
 const demoRow = listBody?.groups?.find?.((g) => g.group === 'demo');
 check('G-5. GET /api/groups → partition rows',
@@ -362,7 +370,7 @@ check('G-6. listing shows only the caller\'s partition rows',
 
 if (MODE === 'mock') {
   // privacy: another client's token sees NOTHING of our partition's groups
-  const foreignListRes = await fetch(`${SRV}/api/groups`, {
+  const foreignListRes = await fetch(`${BASE}/api/groups`, {
     headers: { Authorization: `Bearer ${await mintMock({ sub: '43', scope: PUBLISHER_SCOPE, client_id: 'other-service' })}` },
   });
   const foreignListBody = await foreignListRes.json().catch(() => ({}));
@@ -375,7 +383,7 @@ if (MODE === 'mock') {
 // ── history ring buffer (Phase 3: opt-in per group) ─────────────────────────
 // 'demo' was created with history:true; publishes into it so far:
 // WS-3 spk-1, PART-3 spk-3 (mock), BC-1 bc-1 — buffers hold stamped envelopes.
-const histTail = await fetch(`${SRV}/api/groups/demo/history?limit=2`, { headers: { Authorization: `Bearer ${idpToken}` } });
+const histTail = await fetch(`${BASE}/api/groups/demo/history?limit=2`, { headers: { Authorization: `Bearer ${idpToken}` } });
 const histTailBody = await histTail.json().catch(() => ({}));
 check('H-1. history tail → ascending, most recent last', histTail.status === 200
   && histTailBody.history_enabled === true
@@ -384,13 +392,13 @@ check('H-1. history tail → ascending, most recent last', histTail.status === 2
   && histTailBody.history[histTailBody.history.length - 1]?.message_id === 'bc-1',
   `status=${histTail.status} total=${histTailBody.total} last=${JSON.stringify(histTailBody.history?.at?.(-1)?.message_id)}`);
 
-const histAll = await fetch(`${SRV}/api/groups/demo/history`, { headers: { Authorization: `Bearer ${idpToken}` } });
+const histAll = await fetch(`${BASE}/api/groups/demo/history`, { headers: { Authorization: `Bearer ${idpToken}` } });
 const histAllBody = await histAll.json().catch(() => ({}));
 check('H-2. history full read → length == total (limit clamps only the tail)',
   histAll.status === 200 && Array.isArray(histAllBody.history) && histAllBody.history.length === histAllBody.total,
   `total=${histAllBody.total}`);
 
-const histClear = await fetch(`${SRV}/api/groups/demo/history`, {
+const histClear = await fetch(`${BASE}/api/groups/demo/history`, {
   method: 'DELETE', headers: { Authorization: `Bearer ${idpToken}` },
 });
 const histClearBody = await histClear.json().catch(() => ({}));
@@ -398,23 +406,23 @@ check('H-3. history clear → cleared == total', histClear.status === 200
   && histClearBody.ok === true && histClearBody.cleared === histAllBody.total,
   `status=${histClear.status} cleared=${histClearBody.cleared}`);
 
-const histAfter = await fetch(`${SRV}/api/groups/demo/history`, { headers: { Authorization: `Bearer ${idpToken}` } });
+const histAfter = await fetch(`${BASE}/api/groups/demo/history`, { headers: { Authorization: `Bearer ${idpToken}` } });
 const histAfterBody = await histAfter.json().catch(() => ({}));
 check('H-4. history empty after clear', histAfter.status === 200
   && histAfterBody.total === 0 && histAfterBody.history.length === 0,
   `total=${histAfterBody.total}`);
 
-const histUnknown = await fetch(`${SRV}/api/groups/ghost-group/history`, { headers: { Authorization: `Bearer ${idpToken}` } });
+const histUnknown = await fetch(`${BASE}/api/groups/ghost-group/history`, { headers: { Authorization: `Bearer ${idpToken}` } });
 check('H-5. history of unknown group → 404', histUnknown.status === 404, `status=${histUnknown.status}`);
 
-const histDisabled = await fetch(`${SRV}/api/groups/demo2/history`, { headers: { Authorization: `Bearer ${idpToken}` } });
+const histDisabled = await fetch(`${BASE}/api/groups/demo2/history`, { headers: { Authorization: `Bearer ${idpToken}` } });
 const histDisabledBody = await histDisabled.json().catch(() => ({}));
 check('H-6. broadcast into a non-history group → nothing recorded (opt-in respected)',
   histDisabled.status === 200 && histDisabledBody.history_enabled === false && histDisabledBody.total === 0,
   `enabled=${histDisabledBody.history_enabled} total=${histDisabledBody.total}`);
 
 // ── presence + disconnect (Phase 2 tail) ────────────────────────────────────
-const presRes = await fetch(`${SRV}/api/groups/demo/presence`, { headers: { Authorization: `Bearer ${idpToken}` } });
+const presRes = await fetch(`${BASE}/api/groups/demo/presence`, { headers: { Authorization: `Bearer ${idpToken}` } });
 const presBody = await presRes.json().catch(() => ({}));
 const ownRow = presBody?.presence?.find?.((p) => p.user_id === memberSub);
 check('P-1. presence: our identity online (stamps + closed world)',
@@ -427,10 +435,10 @@ if (MODE === 'mock') {
   // foreign disconnect refused: our token cannot close another client's socket
   const foreignDiscToken = await mintMock({ sub: '99', scope: PUBLISHER_SCOPE, client_id: 'other-service' });
   const foreignDiscConn = new HubConnectionBuilder()
-    .withUrl(`${SRV}/realtime/hub`, { accessTokenFactory: () => foreignDiscToken })
+    .withUrl(`${BASE}/realtime/hub`, { accessTokenFactory: () => foreignDiscToken })
     .build();
   await foreignDiscConn.start();
-  const foreignDiscRes = await fetch(`${SRV}/api/connections/${encodeURIComponent(foreignDiscConn.connectionId)}/disconnect`, {
+  const foreignDiscRes = await fetch(`${BASE}/api/connections/${encodeURIComponent(foreignDiscConn.connectionId)}/disconnect`, {
     method: 'POST', headers: authHdrs,   // our spa-demo-client token
   });
   check('D-1. disconnect of another client_id\'s connection → 403',
@@ -439,7 +447,7 @@ if (MODE === 'mock') {
 }
 
 // own disconnect: allowed, evicts the socket immediately
-const discRes = await fetch(`${SRV}/api/connections/${encodeURIComponent(connection.connectionId)}/disconnect`, {
+const discRes = await fetch(`${BASE}/api/connections/${encodeURIComponent(connection.connectionId)}/disconnect`, {
   method: 'POST', headers: authHdrs,
 });
 const discBody = await discRes.json().catch(() => ({}));
@@ -450,27 +458,27 @@ await sleep(800);
 check('D-3. connection actually closed', connection.state === 'Disconnected',
   `state=${connection.state}`);
 
-const presAfter = await fetch(`${SRV}/api/groups/demo/presence`, { headers: { Authorization: `Bearer ${idpToken}` } });
+const presAfter = await fetch(`${BASE}/api/groups/demo/presence`, { headers: { Authorization: `Bearer ${idpToken}` } });
 const presAfterBody = await presAfter.json().catch(() => ({}));
 const ownRowAfter = presAfterBody?.presence?.find?.((p) => p.user_id === memberSub);
 check('D-4. presence after disconnect: identity persists, online=false',
   ownRowAfter && ownRowAfter.online === false && ownRowAfter.connections === 0,
   `row=${JSON.stringify(ownRowAfter)}`);
 
-const discGhost = await fetch(`${SRV}/api/connections/${encodeURIComponent('no-such-conn')}/disconnect`, {
+const discGhost = await fetch(`${BASE}/api/connections/${encodeURIComponent('no-such-conn')}/disconnect`, {
   method: 'POST', headers: authHdrs,
 });
 check('D-5. disconnect of unknown connection → 404', discGhost.status === 404, `status=${discGhost.status}`);
 
 await connection.stop().catch?.(() => {});
 // ── 6. server gates (no IdP round-trips required) ───────────────────────────
-const anon = await fetch(`${SRV}/api/publish`, {
+const anon = await fetch(`${BASE}/api/publish`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ group: 'demo', data: { type: 'chat_receive', text: 'x' } }),
 });
 check('GATE-1a. unauthenticated publish → 401', anon.status === 401);
 
-const noAuthNegotiate = await fetch(`${SRV}/realtime/hub/negotiate?negotiateVersion=1`, { method: 'POST' });
+const noAuthNegotiate = await fetch(`${BASE}/realtime/hub/negotiate?negotiateVersion=1`, { method: 'POST' });
 check('GATE-1b. negotiate with no token → 401', noAuthNegotiate.status === 401, `status=${noAuthNegotiate.status}`);
 
 // WS gate: an unauthenticated/garbage WS upgrade must be rejected by the
@@ -491,13 +499,13 @@ async function wsUpgradeShouldFail(url) {
     setTimeout(() => finish(true), 3000); // timeout treated as rejection
   });
 }
-check('GATE-1c. WS upgrade without connection token → rejected', await wsUpgradeShouldFail(`${SRV}/realtime/hub`));
+check('GATE-1c. WS upgrade without connection token → rejected', await wsUpgradeShouldFail(`${BASE}/realtime/hub`));
 check('GATE-1d. WS upgrade with garbage connection token → rejected',
-  await wsUpgradeShouldFail(`${SRV}/realtime/hub?access_token=garbage-JWT`));
+  await wsUpgradeShouldFail(`${BASE}/realtime/hub?access_token=garbage-JWT`));
 
 if (freshlyMinted && MODE === 'mock') {
   const weakToken = await mintMock({ sub: 'rng-user', scope: 'realtime:connect', client_id: 'spa-demo-client' });
-  const noScope = await fetch(`${SRV}/api/publish`, {
+  const noScope = await fetch(`${BASE}/api/publish`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${weakToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ group: 'demo', data: { type: 'chat_receive', text: 'x' } }),
@@ -510,7 +518,7 @@ if (freshlyMinted && MODE === 'mock') {
 // (a scraper must never trip a client's budget). Expose it only on the
 // internal network (deploy compose binds it per Phase 5).
 {
-  const res = await fetch(`${SRV}/metrics`);
+  const res = await fetch(`${OPS}/metrics`);
   const body = await res.text();
   const contentType = res.headers.get('content-type') ?? '';
   check('MC-1. GET /metrics → prometheus scrape (text/plain, runtime + http collectors)',
@@ -523,7 +531,7 @@ if (freshlyMinted && MODE === 'mock') {
 
 // ── contract freeze: live OpenAPI matches the frozen snapshot ───────────────
 const contractSnap = JSON.parse(readFileSync(CONTRACT_FILE, 'utf8'));
-const liveDoc = await (await fetch(`${SRV}/openapi/v1.json`)).json();
+const liveDoc = await (await fetch(`${OPS}/openapi/v1.json`)).json();
 const snapPaths = Object.keys(contractSnap.paths ?? {}).sort().join(',');
 const livePaths = Object.keys(liveDoc.paths ?? {}).sort().join(',');
 check('OC-1. live OpenAPI paths == frozen docs/openapi-v1.json',
@@ -537,7 +545,7 @@ check('OC-1. live OpenAPI paths == frozen docs/openapi-v1.json',
 let saw429 = false;
 let attempts = 0;
 for (; attempts < 500 && !saw429; attempts++) {
-  const res = await fetch(`${SRV}/api/publish`, {
+  const res = await fetch(`${BASE}/api/publish`, {
     method: 'POST',
     headers: authHdrs,
     body: JSON.stringify({ group: 'ghost-group', data: { type: 'chat_receive', text: 'burst' } }),
@@ -559,7 +567,7 @@ if (MODE === 'mock' && saw429 && freshlyMinted) {
   // Partition isolation: another client_id's window is untouched even while
   // the caller's partition is exhausted.
   const probeToken = await mintMock({ sub: '42', scope: PUBLISHER_SCOPE, client_id: 'rate-probe' });
-  const probe = await fetch(`${SRV}/api/publish`, {
+  const probe = await fetch(`${BASE}/api/publish`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${probeToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ group: 'ghost-group', data: { type: 'chat_receive', text: 'probe' } }),
@@ -574,7 +582,7 @@ if (MODE === 'mock' && saw429 && freshlyMinted) {
 let send429 = false;
 let sendAttempts = 0;
 for (; sendAttempts < 700 && !send429; sendAttempts++) {
-  const res = await fetch(`${SRV}/api/connections/${encodeURIComponent('no-such-connection')}/send`, {
+  const res = await fetch(`${BASE}/api/connections/${encodeURIComponent('no-such-connection')}/send`, {
     method: 'POST', headers: authHdrs,
     body: JSON.stringify({ data: { type: 'notify_receive', text: 'send-burst' } }),
   });
@@ -592,7 +600,7 @@ if (!send429) check('RL-3. send lane tripped its own 429 (lane budgets are separ
 
 if (MODE === 'mock' && send429 && freshlyMinted) {
   const probeToken = await mintMock({ sub: '42', scope: PUBLISHER_SCOPE, client_id: 'rate-probe' });
-  const probe = await fetch(`${SRV}/api/connections/${encodeURIComponent('no-such-connection')}/send`, {
+  const probe = await fetch(`${BASE}/api/connections/${encodeURIComponent('no-such-connection')}/send`, {
     method: 'POST',
     headers: { Authorization: `Bearer ${probeToken}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ data: { type: 'notify_receive', text: 'send-probe' } }),

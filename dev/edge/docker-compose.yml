@@ -1,0 +1,53 @@
+# Edge rehearsal (not for prod): replicate the central Caddy's route shape
+# locally — caddy:2 fronting the PROD-shaped realtime container (ports-only
+# via the edge), mock IdP reached over the host gateway.
+#
+#   bash dev/edge-rehearsal.sh
+#
+services:
+  realtime:
+    image: realtime:latest          # dev/build-image.sh stages + builds it
+    ports:
+      - '5001:5000'                 # rehearsal-only: the OPS door must be reachable
+                                    # for the metrics/openapi gates (prod uses the
+                                    # internal `realtime` docker network instead)
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://0.0.0.0:5000
+      # mock IdP on the HOST — mirrors the gh_webhooks .env pattern, where the
+      # prod compose defaults to the real authority instead
+      AUTH_AUTHORITY: http://host.docker.internal:9001/realms/demo
+      AUTH_AUDIENCE: ''
+      PUBLISH_REQUIRED_SCOPE: api://ws-server/app:publisher
+      ALLOWED_ORIGINS: http://localhost:3000,https://*.adolfrey.com
+      CONN_TOKEN_SECRET: '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'  # rehearsal only
+      CONN_TOKEN_TTL: '300'
+    extra_hosts:
+      - 'host.docker.internal:host-gateway'
+    restart: unless-stopped
+    healthcheck:
+      test: ['CMD', 'curl', '-sf', 'http://localhost:5000/healthz']
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
+    networks:
+      - realtime
+      - edge
+
+  caddy:
+    image: caddy:2-alpine
+    ports:
+      - '8080:8080'
+    volumes:
+      - ./caddy-rehearsal.Caddyfile:/etc/caddy/Caddyfile:ro
+    restart: unless-stopped
+    depends_on:
+      realtime:
+        condition: service_healthy
+    networks:
+      - edge
+
+networks:
+  realtime:                  # internal door (mirrors the prod split)
+  edge:                      # what the edge container shares with the service

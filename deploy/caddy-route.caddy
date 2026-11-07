@@ -1,0 +1,29 @@
+# realtime edge routes — paste INSIDE the central Caddy's apis.adolfrey.com
+# server block (~next to the gh_webhooks handle), then `caddy reload`.
+#
+# Route shape (public prefix /realtime-v2 — plan §7.4; cutover = switch the
+# wall's /websockets/* handles to the same blocks with a repointed prefix):
+#
+#   wss://apis.adolfrey.com/realtime-v2/realtime/hub → realtime:5000 /realtime/hub
+#   https://apis.adolfrey.com/realtime-v2/api/*      → realtime:5000 /api/*
+#
+# The public surface hangs under ONE prefix and keeps the SERVICE's canonical
+# paths — base URL + contract paths, verbatim (docs/CONTRACT.md). Caddy
+# transparently handles the WS Upgrade; handle_path strips the prefix so the
+# upstream sees its canonical routes. The operational surface (/metrics,
+# /openapi, /healthz) is DENIED at the edge — scraping/contract apps use the
+# internal docker door (deploy/docker-compose.yml `realtime` network).
+#
+# ⚠ Cloudflare Access scoping (same warning as the wall's deploy compose):
+# keep the Access application for gh_webhooks LIMITED to /gh_webhooks/* — a
+# host-wide Access app would 302 browser WS/negotiate calls to the Access
+# login, never reaching the service's own fences.
+
+@ops path /realtime-v2/metrics* /realtime-v2/openapi* /realtime-v2/healthz*
+handle @ops {
+	respond 404
+}
+
+handle_path /realtime-v2/* {
+	reverse_proxy realtime:5000
+}
