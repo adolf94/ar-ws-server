@@ -1,0 +1,51 @@
+name: Publish npm client (GitHub Packages)
+
+# @adolf94/realtime-client → npm.pkg.github.com/adolf94
+# Manual trigger only; publish the declared package.json version unless an
+# override is passed. Conventions mirror the sibling ar-oauth2 publish
+# workflows.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version override (e.g. 0.2.0). Empty = package.json version.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  npm:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@adolf94'
+
+      - name: Version (override)
+        if: ${{ inputs.version != '' }}
+        run: npm version "${PACKAGE_VERSION}" --allow-same-version --no-git-tag-version
+        working-directory: clients/ts
+        env:
+          PACKAGE_VERSION: ${{ inputs.version }}
+
+      - name: Install
+        run: npm ci
+        working-directory: clients/ts
+
+      - name: Build
+        run: npm run build
+        working-directory: clients/ts
+
+      - name: Publish to GitHub Packages
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npm publish
+        working-directory: clients/ts

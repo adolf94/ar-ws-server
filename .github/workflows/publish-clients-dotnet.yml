@@ -1,0 +1,52 @@
+name: Publish dotnet client (GitHub Packages)
+
+# Ar.Realtime.Client → nuget.pkg.github.com/adolf94
+# Manual trigger only. Conventions mirror the sibling ar-oauth2
+# publish-dotnet-client workflow (dispatch, optional version override).
+#
+# Versioning: the csproj declares <Version>0.1.0-local</Version> for the local
+# dev feed (../local-nuget) — CI packs the published lineage: the override
+# when given, otherwise the declared version with the -local suffix stripped.
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version override (e.g. 0.2.0). Empty = csproj version with -local stripped.'
+        required: false
+        default: ''
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  dotnet:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
+
+      - name: Pack
+        run: |
+          set -euo pipefail
+          version="${PACKAGE_VERSION}"
+          [ -n "$version" ] || version="$(sed -n 's|.*<Version>\(.*\)-local</Version>.*|\1|p' src/Ar.Realtime.Client/Ar.Realtime.Client.csproj)"
+          echo "Packing Ar.Realtime.Client ${version}"
+          dotnet pack src/Ar.Realtime.Client/Ar.Realtime.Client.csproj -c Release -o ./nupkgs "/p:Version=${version}"
+        working-directory: clients/dotnet
+        env:
+          PACKAGE_VERSION: ${{ inputs.version }}
+
+      - name: Push to GitHub Packages
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          dotnet nuget add source https://nuget.pkg.github.com/adolf94/index.json \
+            --name github --username adolf94 --password "$TOKEN" --store-password-in-clear-text
+          dotnet nuget push ./nupkgs/*.nupkg --source github --api-key "$TOKEN" --skip-duplicate
+        working-directory: clients/dotnet

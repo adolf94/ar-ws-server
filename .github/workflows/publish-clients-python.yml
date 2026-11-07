@@ -1,0 +1,66 @@
+name: Publish python client (GitHub Releases)
+
+# ar-realtime-client → GitHub Releases (dist/ sdist+wheels). GitHub Packages
+# hosts no PyPI registry, so distributions land under Releases — the
+# ar-oauth2 convention. Manual trigger only; the release tag is v<version>
+# (created here when missing).
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version override (e.g. 0.2.0). Empty = pyproject.toml version.'
+        required: false
+        default: ''
+
+permissions:
+  contents: write        # create the release + upload distributions
+
+jobs:
+  python:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install build tools
+        run: pip install build
+
+      - name: Update version (override)
+        if: ${{ inputs.version != '' }}
+        run: |
+          # accept both "0.2.0" and release-tag style "v0.2.0" for the wheel
+          CLEAN="${PACKAGE_VERSION#v}"
+          sed -i "s/^version = .*/version = \"${CLEAN}\"/" pyproject.toml
+        working-directory: clients/python
+        env:
+          PACKAGE_VERSION: ${{ inputs.version }}
+
+      - name: Build package
+        run: python -m build
+        working-directory: clients/python
+
+      - name: Resolve release tag
+        id: rel
+        run: |
+          set -euo pipefail
+          if [ -n "$PACKAGE_VERSION" ]; then
+            version="${PACKAGE_VERSION#v}"
+          else
+            version="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' pyproject.toml)"
+          fi
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
+        working-directory: clients/python
+        env:
+          PACKAGE_VERSION: ${{ inputs.version }}
+
+      - name: Upload dists to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.rel.outputs.tag }}
+          name: "ar-realtime-client ${{ steps.rel.outputs.tag }}"
+          files: clients/python/dist/*
+          allow_updates: true   # re-dispatch replaces the distributions
