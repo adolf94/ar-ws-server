@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk.Web">
+
+  <!--
+    Realtime server (successor of the Centrifugo + proxy-wall stack).
+    See ../../centrifugo/docs/PLAN-OWN-SERVER.md for the design:
+      - one process: SignalR hub (bus) + minimal API (server API)
+      - negotiate middleware issues a short-lived, server-signed connection
+        token into the NEGOTIATE RESPONSE's accessToken field (§5.2)
+      - IdP tokens are verified via Ar.Auth.OpenId (VerifyTokenAsync)
+  -->
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <RootNamespace>Realtime</RootNamespace>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- hub-side connection-token scheme (HS256, ?access_token query-or-header) -->
+    <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.0" />
+    <!-- IdP token verification: docs/INTEGRATION.md's official IdP client -->
+    <PackageReference Include="Ar.Auth.OpenId" Version="1.0.5-local" />
+  </ItemGroup>
+</Project>

@@ -1,0 +1,9 @@
+{
+  "name": "realtime-e2e",
+  "private": true,
+  "type": "module",
+  "description": "Phase-0 spike e2e: negotiate-issued connection token → hub connect → publish from the server API → publication received",
+  "dependencies": {
+    "@microsoft/signalr": "^10.0.11"
+  }
+}
