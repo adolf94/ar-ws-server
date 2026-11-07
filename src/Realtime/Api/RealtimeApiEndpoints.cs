@@ -38,6 +38,12 @@ public static class RealtimeApiEndpoints
         public JsonElement Data { get; set; }
     }
 
+    public sealed class BroadcastRequest
+    {
+        public List<string>? Groups { get; set; }
+        public JsonElement Data { get; set; }
+    }
+
     public sealed class CreateGroupRequest
     {
         public string? Name { get; set; }
@@ -82,6 +88,63 @@ public static class RealtimeApiEndpoints
 
                 await hubContext.Clients.Group(partitioner.Physical(partition, request.Group)).SendAsync("event", data);
                 return Results.Ok(new { ok = true, group = request.Group, partition });
+            });
+
+        // ── POST /api/broadcast — one envelope into several groups (plan
+        // §5.3), all names auto-scoped to the caller's partition like
+        // publish. Unknown groups are skipped and REPORTED (only the
+        // caller's own partition is inspected — no cross-partition info).
+        endpoints.MapPost("/broadcast",
+            [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
+            async (BroadcastRequest request, HttpContext http,
+                IHubContext<RealtimeHub> hubContext, IGroupRegistry groups,
+                IGroupPartitioner partitioner) =>
+            {
+                var requested = request.Groups?.Where(g => !string.IsNullOrWhiteSpace(g)).Distinct().ToList() ?? [];
+                if (requested.Count == 0)
+                    return Results.BadRequest(new { error = "groups_required", detail = "body.groups needs at least one group name" });
+
+                if (request.Data.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+                    return Results.BadRequest(new { error = "data_required", detail = "body.data carries the event (plan §5.3)" });
+
+                var data = JsonNode.Parse(request.Data.GetRawText());
+                if (data is null)
+                    return Results.BadRequest(new { error = "data_invalid", detail = "body.data must be a JSON value" });
+
+                var partition = partitioner.PartitionOf(http.User);
+                var known = requested.Where(g => groups.Exists(partition, g)).ToList();
+                var unknown = requested.Except(known).ToList();
+
+                data["from"] = (string?)http.User.GetClientId() ?? "server";
+                data["sent_at"] = DateTime.UtcNow.ToString("o");
+
+                // one wire pass, SignalR fans out to all groups listed
+                await hubContext.Clients.Groups(known.Select(g => partitioner.Physical(partition, g))).SendAsync("event", data);
+                return Results.Ok(new
+                {
+                    ok = true,
+                    partition,
+                    groups_delivered = known,
+                    unknown_groups = unknown,
+                });
+            });
+
+        // ── GET /api/groups — the caller's partition only (plan §5.3:
+        // "list + subscriber counts"): persisted member count + how many
+        // member identities currently hold live sockets.
+        endpoints.MapGet("/groups",
+            [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
+            (HttpContext http, IGroupRegistry groups, IConnectionRegistry connections, IGroupPartitioner partitioner) =>
+            {
+                var partition = partitioner.PartitionOf(http.User);
+                var listing = groups.List(partition).Select(g => new
+                {
+                    group = g.Group,
+                    members = g.Members.Count,
+                    // distinct identities with ≥1 live socket right now
+                    online = g.Members.Count(m => connections.ConnectionsFor(m).Count > 0),
+                });
+                return Results.Ok(new { ok = true, partition, groups = listing });
             });
 
         // ── POST /api/users/{sub}/send — cross-service unicast (owner spec,

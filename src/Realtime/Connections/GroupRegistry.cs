@@ -26,6 +26,10 @@ public interface IGroupRegistry
     void AddMember(string partition, string groupId, string memberKey);
 
     bool RemoveMember(string partition, string groupId, string memberKey);
+
+    /// <summary>Every group in one partition with its persisted member keys
+    /// (feeds GET /api/groups: listing + member counts). Sorted by group id.</summary>
+    IReadOnlyList<(string Group, IReadOnlyCollection<string> Members)> List(string partition);
 }
 
 public sealed class InMemoryGroupRegistry : IGroupRegistry
@@ -79,5 +83,19 @@ public sealed class InMemoryGroupRegistry : IGroupRegistry
         _groupsByMember.TryGetValue(memberKey, out var groups);
         groups?.TryRemove(GroupKey(partition, groupId), out _);
         return removed;
+    }
+
+    public IReadOnlyList<(string Group, IReadOnlyCollection<string> Members)> List(string partition)
+    {
+        var prefix = $"{partition}{KeySep}";
+        var result = new List<(string, IReadOnlyCollection<string>)>();
+        foreach (var (key, members) in _membersByGroup)
+        {
+            if (!key.StartsWith(prefix, StringComparison.Ordinal)) continue;
+            var group = key[prefix.Length..];
+            result.Add((group, [.. members.Keys]));
+        }
+        result.Sort((a, b) => string.CompareOrdinal(a.Item1, b.Item1));
+        return result;
     }
 }

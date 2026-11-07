@@ -316,9 +316,63 @@ if (MODE === 'mock') {
     `received=${JSON.stringify(received)}`);
 }
 
+// ── broadcast (plan §5.3): one envelope into several groups, all caller-
+// partition-scoped; unknown groups are skipped + reported. ──────────────────
+received = null;
+const bcCreateRes = await fetch(`${SRV}/api/groups`, {
+  method: 'POST', headers: authHdrs,
+  body: JSON.stringify({ name: 'demo2' }),
+});
+check('BC-0. create demo2 → ok', bcCreateRes.status === 201 || bcCreateRes.status === 200, `status=${bcCreateRes.status}`);
+
+const bcRes = await fetch(`${SRV}/api/broadcast`, {
+  method: 'POST', headers: authHdrs,
+  body: JSON.stringify({ groups: ['demo', 'demo2', 'ghost-group'], data: { type: 'chat_receive', message_id: 'bc-1', text: 'broadcast' } }),
+});
+const bcBody = await bcRes.json().catch(() => ({}));
+check('BC-1. broadcast → 200, delivered groups reported',
+  bcRes.status === 200 && Array.isArray(bcBody.groups_delivered) && bcBody.groups_delivered.sort().join(',') === 'demo,demo2',
+  `status=${bcRes.status} delivered=${JSON.stringify(bcBody.groups_delivered)}`);
+check('BC-2. unknown groups reported (own partition only)',
+  Array.isArray(bcBody.unknown_groups) && bcBody.unknown_groups.join(',') === 'ghost-group',
+  `unknown=${JSON.stringify(bcBody.unknown_groups)}`);
+await sleep(800);
+check('BC-3. broadcast delivered to the connection', received?.message_id === 'bc-1',
+  `received=${JSON.stringify(received)}`);
+
+const bcNoGroups = await fetch(`${SRV}/api/broadcast`, {
+  method: 'POST', headers: authHdrs,
+  body: JSON.stringify({ groups: [], data: { type: 'chat_receive', text: 'x' } }),
+});
+check('GATE-5. broadcast with empty groups → 400', bcNoGroups.status === 400, `status=${bcNoGroups.status}`);
+
+// ── GET /api/groups: listing + persisted member counts + live identities ────
+const listRes = await fetch(`${SRV}/api/groups`, { headers: { Authorization: `Bearer ${idpToken}` } });
+const listBody = await listRes.json().catch(() => ({}));
+const demoRow = listBody?.groups?.find?.((g) => g.group === 'demo');
+check('G-5. GET /api/groups → partition rows',
+  listRes.status === 200 && typeof listBody.partition === 'string' &&
+    demoRow && demoRow.members >= 1 && demoRow.online >= 1,
+  `status=${listRes.status} partition=${listBody.partition ?? '?'} demo=${JSON.stringify(demoRow)}`);
+check('G-6. listing shows only the caller\'s partition rows',
+  listBody.groups.some((g) => g.group === 'demo2') && !listBody.groups.some((g) => g.group === 'ghost-group'),
+  `groups=${JSON.stringify(listBody.groups?.map?.((g) => g.group))}`);
+
+if (MODE === 'mock') {
+  // privacy: another client's token sees NOTHING of our partition's groups
+  const foreignListRes = await fetch(`${SRV}/api/groups`, {
+    headers: { Authorization: `Bearer ${await mintMock({ sub: '43', scope: PUBLISHER_SCOPE, client_id: 'other-service' })}` },
+  });
+  const foreignListBody = await foreignListRes.json().catch(() => ({}));
+  check('G-7. listing is partition-private (other client sees none of ours)',
+    foreignListRes.status === 200 && Array.isArray(foreignListBody.groups) &&
+      !foreignListBody.groups.some((g) => ['demo', 'demo2'].includes(g.group)),
+    `other partition groups=${JSON.stringify(foreignListBody.groups?.map?.((g) => g.group))}`);
+}
+
 await connection.stop();
 
-// ── 6. server gates (no IdP round-trips required) ────────────────────────────
+// ── 6. server gates (no IdP round-trips required) ───────────────────────────
 const anon = await fetch(`${SRV}/api/publish`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' },
   body: JSON.stringify({ group: 'demo', data: { type: 'chat_receive', text: 'x' } }),

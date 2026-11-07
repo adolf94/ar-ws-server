@@ -60,14 +60,17 @@
   Connect-time + runtime verified: e2e G-1..4, GATE-2b, PART-1..4 —
   mock lane 18/18, real lane 13/13. Remaining Phase 1 polish: group
   listing/counts endpoint (data exists in `IGroupRegistry`).
-- [ ] Phase 2: broadcast, presence/info endpoint, group listing/counts; full
-  contract + OpenAPI. §5.3 unicast gap **closed 2026-11-07**:
+- [ ] Phase 2: presence/info endpoints; full contract + OpenAPI.
+  §5.3 unicast gap **closed 2026-11-07**:
   ✅ send-to-user (`POST /api/users/{sub}/send`, user_channel, e2e SEND-1..4
   incl. cross-service delivery) and ✅ send-to-connection
   (`POST /api/connections/{id}/send`, partition-scoped per owner —
   e2e SEND-5/6, GATE-4/4b; registry gained a `connectionId → identity`
   reverse index, `IGroupPartitioner.IdentityPartition` decodes the target's
-  partition). Remaining Phase 2 §5.3: broadcast, info, disconnect endpoint.
+  partition). Also ✅ 2026-11-07: broadcast (one wire pass, unknown groups
+  reported) + `GET /api/groups` (partition-private, members/online counts)
+  — e2e BC-0..3, G-5..G-7. Remaining §5.3: per-group presence feed,
+  history read/clear, `info`, disconnect endpoint.
 - [ ] Phase 3: history ring buffer, metrics, rate limiting, Dockerfile
 - [ ] Phase 4: SPA migration (`centrifuge-js` → `@microsoft/signalr`),
   INTEGRATION.md rewrite (nucleus written: `docs/INTEGRATION.md`, phase-0
@@ -215,3 +218,18 @@ round-trip), confirm green, then `git add -A && git commit -m "phase-0 spike: ne
   the `spa-demo-client` token → 403). Lanes: **mock 28/28, real 20/20**.
 - Next action remains Phase 2: broadcast + listing/counts + presence, then
   §4 contract freeze/OpenAPI; after that the SPA migration (Phase 4).
+
+**Follow-up 7 — 2026-11-07 (broadcast + group listing):**
+- `POST /api/broadcast { groups[], data }`: ONE wire pass
+  (`Clients.Groups`) across every caller-partition-scoped group name;
+  unknown groups deliver to zero and are REPORTED in `unknown_groups`
+  (leaks nothing — only the caller's own partition is inspected).
+  `400 groups_required` on empty list.
+- `GET /api/groups`: partition-private listing with persisted `members`
+  count + `online` (identities holding ≥1 live socket right now) — built
+  straight on `IGroupRegistry.List(partition)` (sorted output).
+- e2e BC-0..3 + GATE-5 (empty groups → 400) + G-5..G-7 (incl. the
+  partition-privacy check: another client's token sees `[]`).
+  Lanes: **mock 36/36, real 27/27**.
+- Next action: Phase 2 tail — per-group presence feed, `info`, disconnect,
+  history edge cases → then §4 contract freeze/OpenAPI before Phase 4.

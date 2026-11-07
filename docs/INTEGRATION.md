@@ -139,7 +139,7 @@ scope-bearing M2M token works.
 | # | Send target | Endpoint | Status |
 |---|---|---|---|
 | 1 | To one group | `POST /api/publish { group, data }` | ✅ today |
-| 2 | To several groups | `POST /api/broadcast { groups[], data }` | ⬜ Phase 2 |
+| 2 | To several groups | `POST /api/broadcast { groups[], data }` | ✅ today (2026-11-07) — unknown groups are skipped + reported in `unknown_groups` (caller's partition only) |
 | 3 | Create a group record | `POST /api/groups { name }` → `201 {ok, group, partition}` | ✅ today (2026-11-07) |
 | 4 | Put user into a group | `POST /api/groups/{g}/members { user_id }` | ✅ today — bearer's `client_id` scopes both the group and the member; no client_id in the body, ever |
 | 5 | Remove user from group | `DELETE /api/groups/{g}/members?user_id=…` | ✅ today |
@@ -187,6 +187,12 @@ Your backend owns the flow (no client-side joining, no auto-join ever):
    `user_id` → `400`. Publish to an unregistered group stays lenient
    for now (`200`, zero subscribers) — the strict `404` story arrives with
    Phase 2.
+5. `POST /api/broadcast { groups[], data }` — one envelope into several
+   groups, same partition scoping; response reports `groups_delivered` +
+   `unknown_groups` (only ever relative to the caller's own partition).
+6. `GET /api/groups` — the caller's partition rows with `members`
+   (persisted identity count) and `online` (identities with ≥1 live socket
+   right now). Partition-private: another client's token sees none of yours.
 
 Group names are free-form strings today; each lives inside the caller's
 `client_id` partition (see §2), so different services' identical names

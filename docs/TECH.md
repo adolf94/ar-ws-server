@@ -194,7 +194,9 @@ latest server/WS-only run: 8/8 PASS with hub identity verified
 | `DELETE /api/groups/{g}/members?user_id=…` | ✅ 2026-11-07 | same scoping; evicts live sockets |
 | `POST /api/users/{sub}/send` `{data}` | ✅ 2026-11-07 | cross-service unicast via `user_channel|{sub}`; NOT partition-scoped by design |
 | `POST /api/connections/{id}/send` `{data}` | ✅ 2026-11-07 | per-socket send, PARTITION-scoped: caller reaches only its own client's sockets (404 unknown / 403 foreign) |
-| `GET /api/groups[/presence|/history]` | ⬜ Phase 2 | presence + ring-buffer history (+ group listing with counts) |
+| `POST /api/broadcast` `{groups[], data}` | ✅ 2026-11-07 | one wire pass across groups; unknown groups reported (caller's partition only) |
+| `GET /api/groups` | ✅ 2026-11-07 | partition-private listing: `members` (persisted) + `online` (live identities) |
+| `GET /api/groups/{g}/presence` · `/history` | ⬜ Phase 2/3 | presence feed + ring-buffer history |
 | Prometheus metrics, rate limiting | ⬜ Phase 3 | |
 | Dockerfile + prod compose + Caddy route | ⬜ Phase 5 | single route, no bus/wall split |
 
