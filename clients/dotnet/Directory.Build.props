@@ -1,0 +1,13 @@
+<Project>
+  <!-- shared across the realtime client-lib projects; mirrors the sibling
+       ar-auth-client-dotnet conventions (net8 target = max compat, the
+       server itself runs net10). -->
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <LangVersion>latest</LangVersion>
+    <TreatWarningsAsErrors>false</TreatWarningsAsErrors>
+    <RootNamespace>Ar.Realtime.Client</RootNamespace>
+  </PropertyGroup>
+</Project>

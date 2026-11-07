@@ -51,8 +51,13 @@ public sealed class InMemoryGroupRegistry : IGroupRegistry
     {
         if (string.IsNullOrEmpty(partition) || string.IsNullOrEmpty(groupId)) return false;
         var key = GroupKey(partition, groupId);
-        _membersByGroup.GetOrAdd(key, _ => new(StringComparer.Ordinal));
-        return true;
+        var created = false;
+        _membersByGroup.GetOrAdd(key, _ =>
+        {
+            created = true;
+            return new(StringComparer.Ordinal);
+        });
+        return created;
     }
 
     public bool Exists(string partition, string groupId) =>

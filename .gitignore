@@ -10,3 +10,5 @@ nuget-feed/
 clients/ts/node_modules/
 clients/ts/dist/
 clients/ts/package-lock.json
+clients/dotnet/bin/
+clients/dotnet/obj/

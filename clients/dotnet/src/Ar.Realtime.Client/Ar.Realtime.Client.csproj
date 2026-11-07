@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net8.0</TargetFramework>
+    <Description>Publisher client for the realtime microservice (HTTP server API — publish/broadcast/unicast/group ops, Cloudflare-safe User-Agent, ar-auth token integration). Contract: docs/CONTRACT.md v1.</Description>
+    <Authors>adolfrey</Authors>
+    <Version>0.1.0-local</Version>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <PackageId>Ar.Realtime.Client</PackageId>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Ar.Auth.OpenId" Version="1.2.0-local" />
+  </ItemGroup>
+</Project>

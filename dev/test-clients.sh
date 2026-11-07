@@ -54,8 +54,13 @@ start_stack || exit 1
 if $wantTs; then
   run_ts || overall=1
 fi
-# dotnet / python conformance land in their own follow-ups (clients/dotnet,
-# clients/python); the server is left running for them while iterated.
+if $wantDotnet; then
+  echo "── clients/dotnet ────────────────────────────"
+  (cd "$REPO_ROOT/clients/dotnet" &&
+    SRV="$SRV_URL" MOCK_AUTH="http://localhost:9001" dotnet test tests/Ar.Realtime.Client.Tests -v minimal) || overall=1
+fi
+# python conformance lands in its own follow-up (clients/python); the server
+# is left running for it while iterated.
 
 stop_stack
 exit $overall
