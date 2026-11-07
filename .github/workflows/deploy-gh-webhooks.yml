@@ -16,9 +16,8 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
-  # Published Ar.Auth.OpenId from adolf94/ar-oauth2 (GitHub Packages NuGet).
-  # Bumps here must also update the Dockerfile ARG fallback. Dev builds are
-  # unaffected — they keep the locally built 1.2.0-local pin in Realtime.csproj.
+  # Must match the Ar.Auth.OpenId pin in src/Realtime/Realtime.csproj — the
+  # staged artifact (below) is what the container restore resolves against.
   AR_AUTH_OPENID_VERSION: "1.2.1"
 
 jobs:
@@ -28,8 +27,8 @@ jobs:
       - uses: actions/checkout@v4
 
       # Dockerfile COPYs nuget-feed/ (gitignored). CI stages the published
-      # Ar.Auth.OpenId artifact from GitHub Packages here; local dev stages
-      # the locally built 1.2.0-local via dev/build-image.sh.
+      # Ar.Auth.OpenId pin from GitHub Packages here; local dev stages the
+      # same-versioned pack via dev/build-image.sh (../local-nuget).
       - name: Stage vendored NuGet feed (Ar.Auth.OpenId from GitHub Packages)
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -73,8 +72,6 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64
-          build-args: |
-            AR_AUTH_OPENID_VERSION=${{ env.AR_AUTH_OPENID_VERSION }}
 
       - name: Trigger homelab deploy webhook (gh_webhooks)
         env:

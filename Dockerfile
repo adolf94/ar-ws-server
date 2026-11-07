@@ -6,19 +6,18 @@
 FROM mcr.microsoft.com/dotnet/sdk:10.0 AS build
 WORKDIR /src
 
-# Ar.Auth.OpenId resolved per environment: CI stages the published GitHub Packages
-# artifact of adolf94/ar-oauth2 into nuget-feed/ and passes an override; local dev
-# keeps the csproj default (1.2.0-local from dev/build-image.sh's vendored feed).
-ARG AR_AUTH_OPENID_VERSION=1.2.1
+# nuget-feed/ is the vendored feed holding Ar.Auth.OpenId (csproj pin decides the
+# version): CI stages the published GitHub Packages artifact, dev stages the
+# local pack via dev/build-image.sh.
 
 COPY docker/NuGet.docker.config ./NuGet.config
 COPY nuget-feed/ /nuget-feed/
 
 COPY src/Realtime/Realtime.csproj ./src/Realtime/
-RUN dotnet restore src/Realtime/Realtime.csproj -p:ArAuthOpenIdVersion=${AR_AUTH_OPENID_VERSION}
+RUN dotnet restore src/Realtime/Realtime.csproj
 
 COPY src/ ./src/
-RUN dotnet publish src/Realtime/Realtime.csproj -c Release -o /app --no-restore -p:ArAuthOpenIdVersion=${AR_AUTH_OPENID_VERSION}
+RUN dotnet publish src/Realtime/Realtime.csproj -c Release -o /app --no-restore
 
 
 FROM mcr.microsoft.com/dotnet/aspnet:10.0
