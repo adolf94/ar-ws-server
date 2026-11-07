@@ -4,6 +4,11 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      deploy:
+        description: "Deploy to homelab via webhook (image push to GHCR always happens)"
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -21,8 +26,12 @@ env:
   AR_AUTH_OPENID_VERSION: "1.2.1"
 
 jobs:
-  build-and-deploy:
+  build:
     runs-on: ubuntu-latest
+    # gh_webhooks requires the tag as sha-<short7>; the deploy job must POST the
+    # exact same tag the metadata below pushed to GHCR.
+    outputs:
+      tag: ${{ steps.meta.outputs.tag }}
     steps:
       - uses: actions/checkout@v4
 
@@ -56,7 +65,6 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # gh_webhooks requires the tag as sha-<short7>; the POST below must match it.
       - name: Compute image tag
         id: meta
         run: |
@@ -73,12 +81,20 @@ jobs:
           cache-to: type=gha,mode=max
           platforms: linux/amd64
 
+  deploy:
+    # Separate stage: only POSTs the webhook, never rebuilds the image.
+    # Needs the exact tag build pushed (see build.outputs.tag).
+    needs: build
+    # Manual dispatch can skip the deploy (image-only rebuilds).
+    if: github.event_name == 'push' || inputs.deploy == true
+    runs-on: ubuntu-latest
+    steps:
       - name: Trigger homelab deploy webhook (gh_webhooks)
         env:
           CLIENT_ID: ${{ secrets.CF_ACCESS_CLIENT_ID }}
           CLIENT_SECRET: ${{ secrets.CF_ACCESS_CLIENT_SECRET }}
           HOOK_SECRET: ${{ secrets.HOMELAB_WEBHOOK_SECRET }}
-          TAG: ${{ steps.meta.outputs.tag }}
+          TAG: ${{ needs.build.outputs.tag }}
         run: |
           BODY=$(jq -nc --arg repo "${{ github.repository }}" --arg tag "$TAG" '{repo:$repo, tag:$tag}')
           TS=$(date +%s)
