@@ -27,6 +27,11 @@ public interface IGroupRegistry
 
     bool RemoveMember(string partition, string groupId, string memberKey);
 
+    /// <summary>Canonical internal key for a partition's group record
+    /// (internal only, never exposed over the wire). Shared with the
+    /// history buffer so both components address identical records.</summary>
+    static string KeyOf(string partition, string groupId) => $"{partition}\u001f{groupId}";
+
     /// <summary>Every group in one partition with its persisted member keys
     /// (feeds GET /api/groups: listing + member counts). Sorted by group id.</summary>
     IReadOnlyList<(string Group, IReadOnlyCollection<string> Members)> List(string partition);

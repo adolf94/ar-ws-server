@@ -47,6 +47,16 @@ public static class RealtimeApiEndpoints
     public sealed class CreateGroupRequest
     {
         public string? Name { get; set; }
+
+        // Phase 3 history (plan §5.4): opt-in per group.
+        [System.Text.Json.Serialization.JsonPropertyName("history")]
+        public bool? History { get; set; }
+
+        [System.Text.Json.Serialization.JsonPropertyName("history_size")]
+        public int? HistorySize { get; set; }
+
+        [System.Text.Json.Serialization.JsonPropertyName("history_ttl_seconds")]
+        public int? HistoryTtlSeconds { get; set; }
     }
 
     public sealed class GroupMemberRequest
@@ -68,7 +78,7 @@ public static class RealtimeApiEndpoints
 
         endpoints.MapPost("/publish",
             [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
-            async (PublishRequest request, HttpContext http, IHubContext<RealtimeHub> hubContext, IGroupPartitioner partitioner) =>
+            async (PublishRequest request, HttpContext http, IHubContext<RealtimeHub> hubContext, IGroupPartitioner partitioner, IHistoryBuffer history) =>
             {
                 if (string.IsNullOrWhiteSpace(request.Group))
                     return Results.BadRequest(new { error = "group_required", detail = "body.group is required" });
@@ -87,6 +97,7 @@ public static class RealtimeApiEndpoints
                 data["sent_at"] = DateTime.UtcNow.ToString("o");
 
                 await hubContext.Clients.Group(partitioner.Physical(partition, request.Group)).SendAsync("event", data);
+                history.Append(IGroupRegistry.KeyOf(partition, request.Group), data);   // Phase 3: opt-in buffer
                 return Results.Ok(new { ok = true, group = request.Group, partition });
             });
 
@@ -98,7 +109,7 @@ public static class RealtimeApiEndpoints
             [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
             async (BroadcastRequest request, HttpContext http,
                 IHubContext<RealtimeHub> hubContext, IGroupRegistry groups,
-                IGroupPartitioner partitioner) =>
+                IGroupPartitioner partitioner, IHistoryBuffer history) =>
             {
                 var requested = request.Groups?.Where(g => !string.IsNullOrWhiteSpace(g)).Distinct().ToList() ?? [];
                 if (requested.Count == 0)
@@ -120,6 +131,8 @@ public static class RealtimeApiEndpoints
 
                 // one wire pass, SignalR fans out to all groups listed
                 await hubContext.Clients.Groups(known.Select(g => partitioner.Physical(partition, g))).SendAsync("event", data);
+                foreach (var group in known) // Phase 3: opt-in buffers per known group
+                    history.Append(IGroupRegistry.KeyOf(partition, group), data);
                 return Results.Ok(new
                 {
                     ok = true,
@@ -199,6 +212,47 @@ public static class RealtimeApiEndpoints
                 return Results.Ok(new { ok = true, connection_id = id, connection_partition = partition, aborted });
             });
 
+        // ── GET /api/groups/{g}/history — Phase 3 replay (plan §5.3): the
+        // ascending, non-expired tail (limit items), identical envelopes.
+        // Opt-in per group at POST /api/groups.
+        endpoints.MapGet("/groups/{group}/history",
+            [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
+            (string group, int? limit, HttpContext http, IGroupRegistry groups,
+                IHistoryBuffer history, IGroupPartitioner partitioner) =>
+            {
+                var partition = partitioner.PartitionOf(http.User);
+                var key = IGroupRegistry.KeyOf(partition, group);
+                if (!groups.Exists(partition, group))
+                    return Results.NotFound(new { error = "group_not_found", detail = "group does not exist in this partition" });
+
+                var (items, total) = history.Peek(key, limit ?? 100, DateTimeOffset.UtcNow);
+                return Results.Ok(new
+                {
+                    ok = true,
+                    group,
+                    group_partition = partition,
+                    history_enabled = history.IsEnabled(key),
+                    total,
+                    history = items,
+                });
+            });
+
+        // ── DELETE /api/groups/{g}/history — clear the ring (plan §5.3
+        // history_remove). Disabled buffer: idempotent {ok, cleared:0}.
+        endpoints.MapDelete("/groups/{group}/history",
+            [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
+            (string group, HttpContext http, IGroupRegistry groups,
+                IHistoryBuffer history, IGroupPartitioner partitioner) =>
+            {
+                var partition = partitioner.PartitionOf(http.User);
+                var key = IGroupRegistry.KeyOf(partition, group);
+                if (!groups.Exists(partition, group))
+                    return Results.NotFound(new { error = "group_not_found", detail = "group does not exist in this partition" });
+
+                var cleared = history.Clear(key);
+                return Results.Ok(new { ok = true, group, group_partition = partition, cleared });
+            });
+
         // ── POST /api/users/{sub}/send — cross-service unicast (owner spec,
         // 2026-11-07): addresses the global user_channel|{sub} joined at
         // connect, so the sub is the ONLY address needed and fan-out ignores
@@ -270,17 +324,26 @@ public static class RealtimeApiEndpoints
         // the client_id"). Idempotent: 201 on create, 200 when it exists.
         endpoints.MapPost("/groups",
             [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
-            (CreateGroupRequest request, HttpContext http, IGroupRegistry groups, IGroupPartitioner partitioner) =>
+            (CreateGroupRequest request, HttpContext http, IGroupRegistry groups, IGroupPartitioner partitioner, IHistoryBuffer history) =>
             {
                 if (string.IsNullOrWhiteSpace(request.Name))
                     return Results.BadRequest(new { error = "group_name_required", detail = "body.name is required" });
 
                 var partition = partitioner.PartitionOf(http.User);
                 var created = groups.Create(partition, request.Name);
+                if (request.History == true)
+                    history.Enable($"{partition}\u001F{request.Name}", request.HistorySize ?? 100, request.HistoryTtlSeconds);
+                var payload = new
+                {
+                    ok = true,
+                    created,
+                    group = request.Name,
+                    partition,
+                    history_enabled = history.IsEnabled($"{partition}\u001F{request.Name}"),
+                };
                 return created
-                    ? Results.Created($"/api/groups/{Uri.EscapeDataString(request.Name)}",
-                        new { ok = true, created = true, group = request.Name, partition })
-                    : Results.Ok(new { ok = true, created = false, group = request.Name, partition });
+                    ? Results.Created($"/api/groups/{Uri.EscapeDataString(request.Name)}", payload)
+                    : Results.Ok(payload);
             });
 
         // ── POST /api/groups/{g}/members — add a member (owner spec: body

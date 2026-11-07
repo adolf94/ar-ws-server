@@ -198,7 +198,7 @@ latest server/WS-only run: 8/8 PASS with hub identity verified
 | `POST /api/broadcast` `{groups[], data}` | ✅ 2026-11-07 | one wire pass across groups; unknown groups reported (caller's partition only) |
 | `GET /api/groups` | ✅ 2026-11-07 | partition-private listing: `members` (persisted) + `online` (live identities) |
 | `GET /api/groups/{g}/presence` | ✅ 2026-11-07 | per-member identity rows decoded from physical keys; online + socket count |
-| `GET /api/groups/{g}/history` · `/history` clear | ⬜ Phase 3 | ring-buffer (read + clear) behind Phase 3's opt-in buffer |
+| `GET /api/groups/{g}/history` · `/history` clear | ✅ 2026-11-07 (Phase 3) | opt-in ring at group create (`history`, `history_size` ≤ 10 000, `history_ttl_seconds`); ascending tail + `total`; clear → `cleared:n` (disabled → 0) |
 | Prometheus metrics, rate limiting | ⬜ Phase 3 | |
 | Dockerfile + prod compose + Caddy route | ⬜ Phase 5 | single route, no bus/wall split |
 

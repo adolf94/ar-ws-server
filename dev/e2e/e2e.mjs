@@ -236,7 +236,7 @@ check('GATE-3b. unauthenticated send → 401', sendAnon.status === 401, `status=
 
 const createRes = await fetch(`${SRV}/api/groups`, {
   method: 'POST', headers: authHdrs,
-  body: JSON.stringify({ name: 'demo' }),
+  body: JSON.stringify({ name: 'demo', history: true }),   // Phase 3: opt-in
 });
 let createBody = await createRes.json().catch(() => ({}));
 check('G-1. POST /api/groups → created/auto client_id partition',
@@ -371,6 +371,47 @@ if (MODE === 'mock') {
       !foreignListBody.groups.some((g) => ['demo', 'demo2'].includes(g.group)),
     `other partition groups=${JSON.stringify(foreignListBody.groups?.map?.((g) => g.group))}`);
 }
+
+// ── history ring buffer (Phase 3: opt-in per group) ─────────────────────────
+// 'demo' was created with history:true; publishes into it so far:
+// WS-3 spk-1, PART-3 spk-3 (mock), BC-1 bc-1 — buffers hold stamped envelopes.
+const histTail = await fetch(`${SRV}/api/groups/demo/history?limit=2`, { headers: { Authorization: `Bearer ${idpToken}` } });
+const histTailBody = await histTail.json().catch(() => ({}));
+check('H-1. history tail → ascending, most recent last', histTail.status === 200
+  && histTailBody.history_enabled === true
+  && histTailBody.total >= 2
+  && Array.isArray(histTailBody.history) && histTailBody.history.length === Math.min(2, histTailBody.total)
+  && histTailBody.history[histTailBody.history.length - 1]?.message_id === 'bc-1',
+  `status=${histTail.status} total=${histTailBody.total} last=${JSON.stringify(histTailBody.history?.at?.(-1)?.message_id)}`);
+
+const histAll = await fetch(`${SRV}/api/groups/demo/history`, { headers: { Authorization: `Bearer ${idpToken}` } });
+const histAllBody = await histAll.json().catch(() => ({}));
+check('H-2. history full read → length == total (limit clamps only the tail)',
+  histAll.status === 200 && Array.isArray(histAllBody.history) && histAllBody.history.length === histAllBody.total,
+  `total=${histAllBody.total}`);
+
+const histClear = await fetch(`${SRV}/api/groups/demo/history`, {
+  method: 'DELETE', headers: { Authorization: `Bearer ${idpToken}` },
+});
+const histClearBody = await histClear.json().catch(() => ({}));
+check('H-3. history clear → cleared == total', histClear.status === 200
+  && histClearBody.ok === true && histClearBody.cleared === histAllBody.total,
+  `status=${histClear.status} cleared=${histClearBody.cleared}`);
+
+const histAfter = await fetch(`${SRV}/api/groups/demo/history`, { headers: { Authorization: `Bearer ${idpToken}` } });
+const histAfterBody = await histAfter.json().catch(() => ({}));
+check('H-4. history empty after clear', histAfter.status === 200
+  && histAfterBody.total === 0 && histAfterBody.history.length === 0,
+  `total=${histAfterBody.total}`);
+
+const histUnknown = await fetch(`${SRV}/api/groups/ghost-group/history`, { headers: { Authorization: `Bearer ${idpToken}` } });
+check('H-5. history of unknown group → 404', histUnknown.status === 404, `status=${histUnknown.status}`);
+
+const histDisabled = await fetch(`${SRV}/api/groups/demo2/history`, { headers: { Authorization: `Bearer ${idpToken}` } });
+const histDisabledBody = await histDisabled.json().catch(() => ({}));
+check('H-6. broadcast into a non-history group → nothing recorded (opt-in respected)',
+  histDisabled.status === 200 && histDisabledBody.history_enabled === false && histDisabledBody.total === 0,
+  `enabled=${histDisabledBody.history_enabled} total=${histDisabledBody.total}`);
 
 // ── presence + disconnect (Phase 2 tail) ────────────────────────────────────
 const presRes = await fetch(`${SRV}/api/groups/demo/presence`, { headers: { Authorization: `Bearer ${idpToken}` } });

@@ -80,7 +80,14 @@
   human contract `docs/CONTRACT.md` (security law, envelope, endpoint
   matrix, scoping one-liners, versioning rule); e2e OC-1 gates the live
   doc against the snapshot — **mock 43/43, real 33/33**
-- [ ] Phase 3: history ring buffer, metrics, rate limiting, Dockerfile
+- [ ] Phase 3: history ring buffer (**opt-in core done 2026-11-07**:
+  `Connections/HistoryBuffer.cs`; `POST /api/groups` gains
+  `history`/`history_size`/`history_ttl_seconds`; publish/broadcast append;
+  `GET/DELETE /api/groups/{g}/history` live — e2e H-1..H-6 incl. opt-in
+  respected and 404s; snapshot re-frozen → now **10 paths**, OC-1 red-on-drift
+  proved itself when it caught the new route pre-freeze). Remaining Phase 3:
+  prometheus metrics, per-client fixed-window rate limiting, Dockerfile +
+  compose
 - [ ] Phase 4: SPA migration (`centrifuge-js` → `@microsoft/signalr`),
   INTEGRATION.md rewrite (nucleus written: `docs/INTEGRATION.md`, phase-0
   contract — extend as Phases 1–3 land)
@@ -270,6 +277,21 @@ round-trip), confirm green, then `git add -A && git commit -m "phase-0 spike: ne
   at SPA cutover).
 - e2e OC-1 anchors the freeze: live paths must equal the snapshot (no
   silent contract drift). Lanes: **mock 43/43, real 33/33**.
-- Next action: Phase 3 — history ring buffer (opt-in per group; the
-  read/clear endpoints already specced in CONTRACT), prometheus metrics,
-  fixed-window rate limiting, Dockerfile + compose.
+  Response schemas; e2e OC-1 anchored. Lanes **mock 43/43, real 33/33**.
+
+**Follow-up 10 — 2026-11-07 (Phase 3: history ring buffer, opt-in):**
+- `Connections/HistoryBuffer.cs` — per-partition-group ring (≤10 000,
+  default 100) + optional TTL applied lazily on read; publishes/broadcasts
+  append the stamped envelope verbatim (cloned node per ring); unicast
+  lanes deliberately unrecorded.
+- `POST /api/groups` gains `{history, history_size, history_ttl_seconds}`
+  (idempotent enable/retune); `GET /api/groups/{g}/history?limit=` returns
+  ascending tail + live `total`; DELETE clears → `cleared:n` (disabled → 0).
+- e2e H-1..H-6 verified opt-in: demo buffer held exactly the 3 predictable
+  publishes (spk-1/spk-3/bc-1), demo2 (no history) held 0.
+- **OC-1 earned its keep**: went red when the live doc grew the history
+  route before re-freeze → snapshot regenerated; now **10 paths**;
+  CONTRACT.md extended (create fields + two history rows).
+- Next action: Phase 3 rest — prometheus metrics, per-client_id
+  fixed-window rate limiting (the 429 story), Dockerfile + compose;
+  then Phase 4 SPA migration against the frozen v1 contract.

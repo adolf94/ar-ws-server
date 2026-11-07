@@ -58,11 +58,13 @@ at send time — no store-and-forward (history buffer: Phase 3).
 | `POST /api/users/{sub}/send` | Bearer+scope | `{data}` | `{ok, user_id}` | 400 data_… |
 | `POST /api/connections/{id}/send` | Bearer+scope | `{data}` | `{ok, connection_id, connection_partition}` | 400 data_… · 404 connection_not_found · 403 connection_not_in_partition |
 | `POST /api/connections/{id}/disconnect` | Bearer+scope | — | `{ok, connection_id, connection_partition, aborted}` | 404/403 same scoping |
-| `POST /api/groups` | Bearer+scope | `{name}` | `201 {ok, created:true, group, partition}` · `200 {…created:false}` | 400 group_name_required |
+| `POST /api/groups` | Bearer+scope | `{name, history?, history_size?, history_ttl_seconds?}` | `201 {ok, created:true, group, partition, history_enabled}` · `200 {…}` (idempotent; re-post with `history:true` enables/retunes) | 400 group_name_required |
 | `POST /api/groups/{g}/members` | Bearer+scope | `{user_id}` | `{ok, group, group_partition, member{user_id,client_id}, connections_joined}` | 404 group_not_found |
 | `DELETE /api/groups/{g}/members?user_id=` | Bearer+scope | — | `{ok, group, group_partition, member{…}, removed}` | 404 group_not_found |
 | `GET /api/groups` | Bearer | — | `{ok, partition, groups:[{group, members, online}]}` | — |
 | `GET /api/groups/{g}/presence` | Bearer | — | `{ok, group, group_partition, presence:[{user_id, client_id, online, connections}]}` | 404 group_not_found |
+| `GET /api/groups/{g}/history?limit=` | Bearer+scope | `?limit` (1..10 000, default 100) | `{ok, group, group_partition, history_enabled, total, history:[event…]}` — ascending tail over non-expired entries | 404 group_not_found |
+| `DELETE /api/groups/{g}/history` | Bearer+scope | — | `{ok, group, group_partition, cleared}` (disabled buffer → `cleared:0`) | 404 group_not_found |
 | `GET /healthz` / `GET /openapi/v1.json` | none | — | config probe / spec | — |
 
 Scoping laws, one line each:
@@ -91,4 +93,5 @@ Scoping laws, one line each:
 * Negative behaviors are e2e-gated (see TODO.md lanes: mock 42/42,
   real 32/32 at freeze time) — a contract claim without a check is a bug.
 * Known deferred by design: publish-to-unknown-group stays lenient until
-  the strict group-service enforcement; history is Phase 3.
+  the strict group-service enforcement; non-history groups record nothing
+  (opt-in is the contract, not an implementation detail).
