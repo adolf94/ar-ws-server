@@ -21,8 +21,13 @@ public interface IGroupPartitioner
 
     /// <summary>The cross-service global user-channel key (owner decision
     /// 2026-11-07): joined at connect regardless of the client's partition;
-    /// SEND side lands with Phase 2 publish/un.</summary>
+    /// SEND side lands with Phase 2 publish/unicast.</summary>
     string UserChannelKey(string sub);
+
+    /// <summary>The partition encoded inside a physical user identity
+    /// (<c>{client_id}|{sub}</c>) — lets per-socket sends verify the caller
+    /// only reaches its own client's sockets (owner spec, 2026-11-07).</summary>
+    string IdentityPartition(string physicalUserKey);
 
     /// <summary>The partition a principal speaks/reads in ("server" if the token has none).</summary>
     string PartitionOf(ClaimsPrincipal principal);
@@ -40,6 +45,14 @@ public sealed class GroupPartitioner : IGroupPartitioner
         $"{Uri.EscapeDataString(Effective(clientId))}|{Uri.EscapeDataString(logicalGroup)}";
 
     public string UserChannelKey(string sub) => Physical(UserChannelPartition, sub);
+
+    public string IdentityPartition(string physicalUserKey)
+    {
+        var sep = physicalUserKey.IndexOf('|');
+        // '|' itself is always escaped by Physical(), so the first '|' IS
+        // the separator; anything malformed boxes into a foreign bucket
+        return sep < 0 ? $"__malformed/{physicalUserKey}" : Uri.UnescapeDataString(physicalUserKey[..sep]);
+    }
 
     public string PartitionOf(ClaimsPrincipal principal)
     {

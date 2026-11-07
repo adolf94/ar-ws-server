@@ -113,6 +113,43 @@ public static class RealtimeApiEndpoints
                 return Results.Ok(new { ok = true, user_id = sub });
             });
 
+        // ── POST /api/connections/{id}/send — per-socket send, PARTITION
+        // SCOPED (owner spec, 2026-11-07): the caller may only reach sockets
+        // whose connection identity lives inside its own client partition —
+        // 404 for unknown sockets, 403 for a foreign partition. This is the
+        // scoped counterpart of the global user_channel unicast above.
+        endpoints.MapPost("/connections/{id}/send",
+            [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
+            async (string id, SendUserRequest request, HttpContext http,
+                IHubContext<RealtimeHub> hubContext, IGroupPartitioner partitioner,
+                IConnectionRegistry connections) =>
+            {
+                if (string.IsNullOrWhiteSpace(id))
+                    return Results.BadRequest(new { error = "connection_id_required", detail = "route connection id is required" });
+
+                if (request.Data.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+                    return Results.BadRequest(new { error = "data_required", detail = "body.data carries the event (plan §5.3)" });
+
+                var data = JsonNode.Parse(request.Data.GetRawText());
+                if (data is null)
+                    return Results.BadRequest(new { error = "data_invalid", detail = "body.data must be a JSON value" });
+
+                if (!connections.TryGetUser(id, out var identityKey))
+                    return Results.NotFound(new { error = "connection_not_found", detail = "no live connection with this id in this process" });
+
+                var partition = partitioner.PartitionOf(http.User);
+                if (partitioner.IdentityPartition(identityKey) != partition)
+                    return Results.Json(
+                        new { error = "connection_not_in_partition", detail = "target connection belongs to another client_id partition" },
+                        statusCode: StatusCodes.Status403Forbidden);   // scoped per owner, 2026-11-07
+
+                data["from"] = (string?)http.User.GetClientId() ?? "server";
+                data["sent_at"] = DateTime.UtcNow.ToString("o");
+
+                await hubContext.Clients.Client(id).SendAsync("event", data);
+                return Results.Ok(new { ok = true, connection_id = id, connection_partition = partition });
+            });
+
         // ── POST /api/groups — create a group record, auto-scoped to the
         // caller's partition (owner spec: "post /groups should also auto add
         // the client_id"). Idempotent: 201 on create, 200 when it exists.

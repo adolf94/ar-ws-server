@@ -181,6 +181,45 @@ if (MODE === 'mock') {
     `received=${JSON.stringify(received)}`);
 }
 
+// ── send to a specific CONNECTION (scoped per owner, 2026-11-07) ────────────
+// One live socket: ours (connected above). Own-socket send must deliver.
+received = null;
+const connSendRes = await fetch(`${SRV}/api/connections/${encodeURIComponent(connection.connectionId)}/send`, {
+  method: 'POST', headers: authHdrs,
+  body: JSON.stringify({ data: { type: 'notify_receive', message_id: 'snd-5', text: 'direct to this socket' } }),
+});
+const connSendBody = await connSendRes.json().catch(() => ({}));
+check('SEND-5. own-connection send → 200 ok', connSendRes.status === 200 && connSendBody.ok === true,
+  `status=${connSendRes.status} conn=${connection.connectionId?.slice(0, 8)}…`);
+await sleep(800);
+check('SEND-6. per-socket delivery received', received?.message_id === 'snd-5',
+  `received=${JSON.stringify(received)}`);
+
+const ghostSend = await fetch(`${SRV}/api/connections/${encodeURIComponent('no-such-connection')}/send`, {
+  method: 'POST', headers: authHdrs,
+  body: JSON.stringify({ data: { type: 'notify_receive', text: 'x' } }),
+});
+check('GATE-4. send to unknown connection → 404', ghostSend.status === 404, `status=${ghostSend.status}`);
+
+if (MODE === 'mock') {
+  // foreign-partition socket: mint a second connection under a DIFFERENT
+  // client_id, then send at it with OUR token — must be refused (caller
+  // scoped to its own client_id).
+  received = null;
+  const foreignToken = await mintMock({ sub: '43', scope: PUBLISHER_SCOPE, client_id: 'other-service' });
+  const foreignConn = new HubConnectionBuilder()
+    .withUrl(`${SRV}/realtime/hub`, { accessTokenFactory: () => foreignToken })
+    .build();
+  await foreignConn.start();
+  const foreignSend = await fetch(`${SRV}/api/connections/${encodeURIComponent(foreignConn.connectionId)}/send`, {
+    method: 'POST', headers: authHdrs,   // our spa-demo-client token
+    body: JSON.stringify({ data: { type: 'notify_receive', message_id: 'snd-6', text: 'must be refused' } }),
+  });
+  check('GATE-4b. send to another client_id\'s connection → 403 (caller scoped)',
+    foreignSend.status === 403, `status=${foreignSend.status}`);
+  await foreignConn.stop();
+}
+
 const sendNoData = await fetch(`${SRV}/api/users/${encodeURIComponent(memberSub ?? '')}/send`, {
   method: 'POST', headers: { Authorization: `Bearer ${idpToken}`, 'Content-Type': 'application/json' },
   body: JSON.stringify({}),
@@ -192,8 +231,6 @@ const sendAnon = await fetch(`${SRV}/api/users/${encodeURIComponent(memberSub ??
   body: JSON.stringify({ data: { type: 'notify_receive', text: 'x' } }),
 });
 check('GATE-3b. unauthenticated send → 401', sendAnon.status === 401, `status=${sendAnon.status}`);
-
- // member's client partition = bearer's client_id (owner spec)
 
 const createRes = await fetch(`${SRV}/api/groups`, {
   method: 'POST', headers: authHdrs,

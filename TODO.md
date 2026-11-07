@@ -61,12 +61,13 @@
   mock lane 18/18, real lane 13/13. Remaining Phase 1 polish: group
   listing/counts endpoint (data exists in `IGroupRegistry`).
 - [ ] Phase 2: broadcast, presence/info endpoint, group listing/counts; full
-  contract + OpenAPI. §5.3 unicast gap **half closed 2026-11-07**:
-  ✅ send-to-user (`POST /api/users/{sub}/send`, user_channel — e2e SEND-1..4
-  incl. cross-service delivery); ⬜ send-to-connection
-  (`/api/connections/{id}/send`) still unplanned — owner decision whether
-  the HTTP route is needed (per-socket delivery is also reachable via
-  `Clients.Client` hub-side)
+  contract + OpenAPI. §5.3 unicast gap **closed 2026-11-07**:
+  ✅ send-to-user (`POST /api/users/{sub}/send`, user_channel, e2e SEND-1..4
+  incl. cross-service delivery) and ✅ send-to-connection
+  (`POST /api/connections/{id}/send`, partition-scoped per owner —
+  e2e SEND-5/6, GATE-4/4b; registry gained a `connectionId → identity`
+  reverse index, `IGroupPartitioner.IdentityPartition` decodes the target's
+  partition). Remaining Phase 2 §5.3: broadcast, info, disconnect endpoint.
 - [ ] Phase 3: history ring buffer, metrics, rate limiting, Dockerfile
 - [ ] Phase 4: SPA migration (`centrifuge-js` → `@microsoft/signalr`),
   INTEGRATION.md rewrite (nucleus written: `docs/INTEGRATION.md`, phase-0
@@ -196,3 +197,21 @@ round-trip), confirm green, then `git add -A && git commit -m "phase-0 spike: ne
 - Next action: Phase 2 — broadcast + group listing/counts + presence
   (`IGroupRegistry` already holds the counts source), then §4 contract
   freeze/OpenAPI.
+
+**Follow-up 6 — 2026-11-07 (send-to-connection, partition-scoped):**
+- Owner decision: build it, and **caller scoped to its own client_id**.
+- `POST /api/connections/{id}/send { data }` live — resolves the socket in
+  the connection registry's NEW reverse index
+  (`connectionId → physical identity`), decodes the target's partition via
+  `IGroupPartitioner.IdentityPartition`, and refuses anything outside the
+  caller's partition: **404 unknown / 403 foreign**
+  (`{error:"connection_not_in_partition"}`). Same envelope law
+  (`from` = caller's client_id, `sent_at`).
+- Contrast with `/users/{sub}/send`: that one is deliberately NOT scoped
+  (global user channel); this one never crosses the caller's partition —
+  two unicast lanes with two different powers.
+- e2e: SEND-5/6 (own socket delivered), GATE-4 (unknown→404),
+  GATE-4b (second mock connection under `other-service`, sending AT it with
+  the `spa-demo-client` token → 403). Lanes: **mock 28/28, real 20/20**.
+- Next action remains Phase 2: broadcast + listing/counts + presence, then
+  §4 contract freeze/OpenAPI; after that the SPA migration (Phase 4).
