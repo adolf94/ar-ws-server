@@ -49,12 +49,17 @@
 
 - [ ] `dev/run-spike.sh`: `fuser -k <SRV port>` in real mode too (currently
   only the mock-IdP port is cleared; a stale :5000 listener defeats the smoke)
-- [ ] Phase 1 core: registry-driven group membership (connect-time + runtime
-  `POST/DELETE /api/groups/{g}/members` by user id); per-service scoping
-  (plan R4) for groups AND user identities is **already implemented**:
-  `GroupPartitioner` namespaces everything behind the caller's verified
-  `client_id` (`Groups/GroupPartitions.cs`; e2e PART-1..4 gate it) —
-  membership ops just build on the same partition helper
+- [x] Phase 1 core: registry-driven group membership + per-service scoping
+  (plan R4) — **done 2026-11-07**: `IGroupPartitioner` namespaces groups and
+  user identities behind the verified bearer `client_id`
+  (`Groups/GroupPartitions.cs`); `IGroupRegistry` stores groups + memberships
+  (`Connections/GroupRegistry.cs`); `POST /api/groups` (auto-scoped,
+  idempotent), `POST/DELETE /api/groups/{g}/members` (body carries only
+  `user_id` — bearer's `client_id` scopes BOTH the group and the member,
+  owner spec); hub applies stored membership at connect (no auto-join).
+  Connect-time + runtime verified: e2e G-1..4, GATE-2b, PART-1..4 —
+  mock lane 18/18, real lane 13/13. Remaining Phase 1 polish: group
+  listing/counts endpoint (data exists in `IGroupRegistry`).
 - [ ] Phase 2: broadcast, presence, info endpoints; full contract + OpenAPI
   — **fold in the plan §5.3 gap surfaced writing `docs/INTEGRATION.md`**:
   add send-to-user (`/api/users/{sub}/send`) and
@@ -158,3 +163,19 @@ round-trip), confirm green, then `git add -A && git commit -m "phase-0 spike: ne
   (earlier greens rode on the warm cache).
 - Next action: start Phase 1 — registry-driven group membership ops on the
   partitioned keys (`POST/DELETE /api/groups/{g}/members` by user id).
+
+**Follow-up 4 — 2026-11-07 (group service, owner-specced):**
+- Owner spec locked: `/groups/{g}/members` takes the member's **actual
+  client_id + sub** BUT the client_id comes from the **Authorization
+  bearer, never the body** (closed world — a service manages only its own
+  users; cross-service fan-out stays `user_channel|{sub}`); endpoints
+  auto-prepend the caller's client_id to the group name.
+- Landed: `Connections/GroupRegistry.cs` (partition-scoped group records +
+  membership, reconnect-surviving), `POST /api/groups` (auto-scope,
+  idempotent 201/200), `POST/DELETE /api/groups/{g}/members` (live sockets
+  joined/evicted immediately via the connection registry), hub now applies
+  stored membership at connect; spike demo auto-join removed.
+- e2e grew G-1..G-4 + GATE-2b (unknown group → 404): **mock 18/18, real
+  13/13** — commit `50772c5` (partitioning) + this follow-up's commit.
+- Next action: Phase 2 — broadcast, presence/counts, the §5.3 unicast gap
+  (`POST /api/groups` listing can ride the existing `IGroupRegistry`).

@@ -76,8 +76,11 @@ Two authentication schemes, by endpoint:
   the same user's tokens from two services are two disjoint identities, so
   `Clients.User(sub)` fans out only to connections of *that service's* tokens
   (plan R5 + R4 on the connection plane).
-* The embedded `client_id` claim keys per-service group scoping (plan R4 —
-  membership scoping lands in Phase 2; the registry already tracks users).
+* The bearer's verified `client_id` scopes EVERYTHING a caller names
+  (plan R4, owner spec 2026-11-07): `GroupPartitioner` namespaces group
+  names and user identities; `IGroupRegistry` stores groups + memberships
+  (closed world — a service manages its own users); the hub applies stored
+  membership at connect and joins `user_channel|{sub}`.
 * Hub-side policies read the embedded `scope`.
 
 ## 3 · The security fence (`Negotiate/SecurityFenceMiddleware.cs`)
@@ -118,7 +121,8 @@ misbehaves.
 | `src/Realtime/Groups/GroupPartitions.cs` | `IGroupPartitioner` — plan R4: encodes `client_id | logical` physical keys for groups AND user identities; every publish, hub join, and `SubUserIdProvider` id goes through it. |
 | `src/Realtime/Auth/SubUserIdProvider.cs` | `sub` → partitioned `Context.UserIdentifier` (`client_id`-scoped user namespace). |
 | `src/Realtime/Connections/ConnectionRegistry.cs` | `IConnectionRegistry` + in-memory impl: `user → connectionIds`. Bridge for user-targeted group ops (used from Phase 2 on). |
-| `src/Realtime/Hubs/RealtimeHub.cs` | WS lifecycle: connect/disconnect registry registration; `data.type` events flow out as methods `event`. **Phase-0 shortcut:** every connection auto-joins group `demo`. |
+| `src/Realtime/Connections/GroupRegistry.cs` | `IGroupRegistry` — plan §5.4 component 2: partition-scoped group records + membership bookkeeping (member keys = the physical `client_id|sub` identities); drives hub connect-time joins. |
+| `src/Realtime/Hubs/RealtimeHub.cs` | WS lifecycle: connect/disconnect registry registration; applies stored group membership + `user_channel|{sub}` at connect (no auto-join); `event` is the only fan-out method. |
 | `src/Realtime/Negotiate/SecurityFenceMiddleware.cs` | The fence (§3 above). |
 | `src/Realtime/Api/RealtimeApiEndpoints.cs` | Server API: `POST /api/publish` — Bearer + publisher scope, `data`-only convention, `from`/`sent_at` stamping. |
 | `dev/mock-idp/server.js` | Offline mock IdP (copied from the wall repo, dependency-free; adds an OIDC discovery doc for Ar.Auth). Fallback only. |
@@ -185,8 +189,10 @@ latest server/WS-only run: 8/8 PASS with hub identity verified
 | `GET /realtime/hub` (WS only) | ✅ spike | read-only clients; `event` method carries publications |
 | `POST /api/publish` `{group, data}` | ✅ spike | publisher scope; envelope stamping |
 | `POST /api/broadcast` | ⬜ Phase 2 | |
-| `POST/DELETE /api/groups/{g}/members` | ⬜ Phase 1 | registry-driven add/remove by user |
-| `GET /api/groups[/presence|/history]` | ⬜ Phase 2 | presence + ring-buffer history |
+| `POST /api/groups` `{name}` | ✅ 2026-11-07 | create group record, auto-scoped to bearer's partition; idempotent |
+| `POST /api/groups/{g}/members` `{user_id}` | ✅ 2026-11-07 | bearer's client_id scopes group + member; applies live + persists |
+| `DELETE /api/groups/{g}/members?user_id=…` | ✅ 2026-11-07 | same scoping; evicts live sockets |
+| `GET /api/groups[/presence|/history]` | ⬜ Phase 2 | presence + ring-buffer history (+ group listing with counts) |
 | Prometheus metrics, rate limiting | ⬜ Phase 3 | |
 | Dockerfile + prod compose + Caddy route | ⬜ Phase 5 | single route, no bus/wall split |
 
@@ -197,13 +203,13 @@ ignore unknown types.
 
 ## 8 · Known limitations (spike stage)
 
-* Group `demo` auto-join on connect is a spike convenience — replaced by
-  registry-driven membership (Phase 1).
 * Per-service group scoping (plan R4) is implemented — `GroupPartitioner`
   namespaces every logical group (and every user identity) behind the
   caller's `client_id`; cross-partition publishes are inherently isolated
-  and e2e-gated (PART-1..4, mock mode). Remaining R4 extension: registry
-  membership / group ops land with Phase 1.
+  and e2e-gated (PART-1..4, mock mode). The group service (plan §5.4) is
+  live: `POST /api/groups` + members ops with stored, reconnect-surviving
+  membership (e2e G-1..G-4 + GATE-2b). Remaining: group listing/counts,
+  presence, broadcast (Phase 2).
 * In-memory registry + root hub logging only: single process, no metrics.
 * The publisher scope lane's 403 negative test runs only in mock mode (the
   real IdP's `speedtest` client carries the publisher scope unconditionally).

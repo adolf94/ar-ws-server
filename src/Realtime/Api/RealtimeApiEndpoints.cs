@@ -2,22 +2,26 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
+using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Routing;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Primitives;
 using Realtime.Auth;
+using Realtime.Connections;
 using Realtime.Groups;
 using Realtime.Hubs;
 
 namespace Realtime.Api;
 
 /// <summary>
-/// The server API (plan §5.3, Phase-0 subset): app backends publish over
+/// The server API (plan §5.3): app backends publish and manage groups over
 /// plain HTTP with Bearer + publisher scope — real status codes, real JSON
-/// errors (plan R8). Every request's logical group is scoped to the caller's
-/// <c>client_id</c> partition (plan R4, <see cref="IGroupPartitioner"/>).
-/// Members/presence/history arrive in Phases 1–2.
+/// errors (plan R8). The bearer's verified <c>client_id</c> is the ONE scope
+/// key (plan R4, owner spec 2026-11-07): it partitions POST /api/groups,
+/// the members endpoints, and POST /api/publish; group membership is closed
+/// to the caller's own users (cross-service fan-out is the user channel,
+/// Phase 2). Members arrive 2026-11-07; presence/history in Phases 2–3.
 /// </summary>
 public static class RealtimeApiEndpoints
 {
@@ -25,6 +29,21 @@ public static class RealtimeApiEndpoints
     {
         public string? Group { get; set; }
         public JsonElement Data { get; set; }
+    }
+
+    public sealed class CreateGroupRequest
+    {
+        public string? Name { get; set; }
+    }
+
+    public sealed class GroupMemberRequest
+    {
+        [System.Text.Json.Serialization.JsonPropertyName("user_id")]
+        public string? UserId { get; set; }
+
+        // NOTE: no client_id in the body, ever (owner spec, 2026-11-07):
+        // the Authorization bearer's client_id IS the scope — the group's
+        // partition AND the member's connection partition in one.
     }
 
     public static IEndpointConventionBuilder MapRealtimeApi(this IEndpointRouteBuilder app) =>
@@ -58,6 +77,108 @@ public static class RealtimeApiEndpoints
                 return Results.Ok(new { ok = true, group = request.Group, partition });
             });
 
+        // ── POST /api/groups — create a group record, auto-scoped to the
+        // caller's partition (owner spec: "post /groups should also auto add
+        // the client_id"). Idempotent: 201 on create, 200 when it exists.
+        endpoints.MapPost("/groups",
+            [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
+            (CreateGroupRequest request, HttpContext http, IGroupRegistry groups, IGroupPartitioner partitioner) =>
+            {
+                if (string.IsNullOrWhiteSpace(request.Name))
+                    return Results.BadRequest(new { error = "group_name_required", detail = "body.name is required" });
+
+                var partition = partitioner.PartitionOf(http.User);
+                var created = groups.Create(partition, request.Name);
+                return created
+                    ? Results.Created($"/api/groups/{Uri.EscapeDataString(request.Name)}",
+                        new { ok = true, created = true, group = request.Name, partition })
+                    : Results.Ok(new { ok = true, created = false, group = request.Name, partition });
+            });
+
+        // ── POST /api/groups/{g}/members — add a member (owner spec: body
+        // carries the member's ACTUAL client_id + sub = which service's
+        // partition the user is connected through; the endpoint auto-prepends
+        // the CALLER's client_id to the group name). Applies live immediately
+        // to every current socket of that identity, and persists the
+        // membership so reconnects re-apply it hub-side.
+        endpoints.MapPost("/groups/{group}/members",
+            [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
+            async (string group, GroupMemberRequest request, HttpContext http,
+                IHubContext<RealtimeHub> hubContext, IGroupRegistry groups,
+                IConnectionRegistry connections, IGroupPartitioner partitioner) =>
+            {
+                if (string.IsNullOrWhiteSpace(group))
+                    return Results.BadRequest(new { error = "group_required", detail = "group name is required" });
+
+                if (string.IsNullOrWhiteSpace(request.UserId))
+                    return Results.BadRequest(new { error = "user_id_required", detail = "body.user_id (sub) is required" });
+
+                var partition = partitioner.PartitionOf(http.User);
+                if (!groups.Exists(partition, group))
+                    return Results.NotFound(new { error = "group_not_found", detail = $"create it first: POST /api/groups" });
+
+                // member identity = the caller's own partition (bearer's
+                // client_id) + the body's sub — i.e. the member must be a
+                // user connected through THIS client (cross-service fan-out
+                // is user_channel|{sub}, not group membership).
+                var memberKey = partitioner.Physical(partition, request.UserId);
+                groups.AddMember(partition, group, memberKey);
+
+                var memberConnections = connections.ConnectionsFor(memberKey);
+                foreach (var connectionId in memberConnections)
+                    await hubContext.Groups.AddToGroupAsync(connectionId, partitioner.Physical(partition, group));
+
+                return Results.Ok(new
+                {
+                    ok = true,
+                    group,
+                    group_partition = partition,
+                    member = new { user_id = request.UserId, client_id = partition },
+                    connections_joined = memberConnections.Count,
+                });
+            });
+
+        // ── DELETE /api/groups/{g}/members?user_id=…&client_id=… — remove a
+        // member; also evicts the member's live sockets from the group now.
+        endpoints.MapDelete("/groups/{group}/members",
+            [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
+            async (string group,
+                [AsParameters] MembershipQuery query, HttpContext http,
+                IHubContext<RealtimeHub> hubContext, IGroupRegistry groups,
+                IConnectionRegistry connections, IGroupPartitioner partitioner) =>
+            {
+                if (string.IsNullOrWhiteSpace(group))
+                    return Results.BadRequest(new { error = "group_required", detail = "group name is required" });
+
+                if (string.IsNullOrWhiteSpace(query.UserId))
+                    return Results.BadRequest(new { error = "user_id_required", detail = "user_id query parameter is required" });
+
+                var partition = partitioner.PartitionOf(http.User);
+                if (!groups.Exists(partition, group))
+                    return Results.NotFound(new { error = "group_not_found", detail = "group does not exist in this partition" });
+
+                var memberKey = partitioner.Physical(partition, query.UserId);
+                var removed = groups.RemoveMember(partition, group, memberKey);
+
+                foreach (var connectionId in connections.ConnectionsFor(memberKey))
+                    await hubContext.Groups.RemoveFromGroupAsync(connectionId, partitioner.Physical(partition, group));
+
+                return Results.Ok(new
+                {
+                    ok = true,
+                    group,
+                    group_partition = partition,
+                    member = new { user_id = query.UserId, client_id = partition },
+                    removed,
+                });
+            });
+
         return endpoints;
+    }
+
+    public sealed class MembershipQuery
+    {
+        [FromQuery(Name = "user_id")] public string? UserId { get; set; }
+        // client_id deliberately absent: bearer scopes it (owner spec).
     }
 }

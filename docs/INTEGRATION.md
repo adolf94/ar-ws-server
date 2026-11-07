@@ -38,15 +38,18 @@ app backend (publisher) ─────► POST /api/publish (IdP Bearer + publi
   * **never set `skipNegotiation: true`** — negotiate is the auth entry point.
 * **Connect-time group placement** (hub, after the fence validates): the
   connection joins `user_channel|{sub}` — a cross-service channel reachable
-  regardless of `client_id` (send side lands with Phase 2 unicast) — plus the
-  partition-scoped `demo` group (spike-only until Phase 1 membership).
+  regardless of `client_id` (send side lands with Phase 2 unicast) — plus
+  every partition-scoped group the identity was added to via the members
+  API (membership is stored server-side and re-applied on every reconnect).
 * The connection JWT is checked only at handshake time. A connection stays
   alive past its 5-min TTL; expiry triggers a reconnect, not a mid-session kill.
 * Identity for fan-out = the verified IdP `sub` claim **partitioned by your
   token's `client_id`**: user identity AND group names are per-service
   namespaces — the same human's tokens from two services are two disjoint
   fan-out addresses, and publishes never reach outside the caller's
-  partition (plan R4). Membership scoping lands ⬜ Phase 1.
+  partition (plan R4). Group membership is scoped the same way: the bearer's
+  `client_id` locates the group AND the member — a service manages its own
+  users into its own groups.
 
 ## 3 · Bus client (SPA)
 
@@ -120,8 +123,8 @@ attempt re-negotiates first. Never cache a connection JWT across reconnects.
 
 ### 3.3 · Groups today
 
-Every connection auto-joins group `demo` (phase-0 convenience). Real membership
-lands in Phase 1 (see §4.2). Do not build against `demo`.
+Membership is **API-driven** (no auto-join): your backend creates the group
+and puts your users in it — see §4.2. Nothing is joined client-side.
 
 ## 4 · App backend (publisher)
 
@@ -136,11 +139,12 @@ scope-bearing M2M token works.
 |---|---|---|---|
 | 1 | To one group | `POST /api/publish { group, data }` | ✅ today |
 | 2 | To several groups | `POST /api/broadcast { groups[], data }` | ⬜ Phase 2 |
-| 3 | Put user into a group | `POST /api/groups/{g}/members { user_id }` | ⬜ Phase 1 |
-| 4 | Remove user from group | `DELETE /api/groups/{g}/members?user_id=…` | ⬜ Phase 1 |
-| 5 | Send to one user (all their connections) | — | ⬜ no endpoint planned |
-| 6 | Send to one connection | — | ⬜ no endpoint planned |
-| 7 | Disconnect a connection | `POST /api/connections/{id}/disconnect` | ⬜ Phase 2 |
+| 3 | Create a group record | `POST /api/groups { name }` → `201 {ok, group, partition}` | ✅ today (2026-11-07) |
+| 4 | Put user into a group | `POST /api/groups/{g}/members { user_id }` | ✅ today — bearer's `client_id` scopes both the group and the member; no client_id in the body, ever |
+| 5 | Remove user from group | `DELETE /api/groups/{g}/members?user_id=…` | ✅ today |
+| 6 | Send to one user (all their connections) | — | ⬜ no endpoint planned (see the §5.3 gap note) |
+| 7 | Send to one connection | — | ⬜ no endpoint planned |
+| 8 | Disconnect a connection | `POST /api/connections/{id}/disconnect` | ⬜ Phase 2 |
 
 Fan-out semantics, server-side:
 
@@ -160,12 +164,22 @@ history buffer (⬜ Phase 3, opt-in per group) is the late-join fix.
 
 ### 4.2 · Groups — how a client ends up in one
 
-1. **Today (phase 0):** every connection auto-joins `demo`.
-2. **⬜ Phase 1 (target):** your backend calls `POST /api/groups/{g}/members`
-   with the client's `sub` right after the client connects; remove with #4.
-   Membership is keyed by user id, so the add applies to all of that user's
-   current sockets. After each reconnect the backend re-applies the group-adds;
-   the server keeps no group memory to rely on.
+Your backend owns the flow (no client-side joining, no auto-join ever):
+
+1. `POST /api/groups { name }` — creates the record inside the bearer's
+   partition (`409`-free: idempotent, `200` when it already exists).
+2. `POST /api/groups/{g}/members { user_id }` — puts the user in; the
+   endpoint scopes BOTH the group and the member by the bearer's
+   `client_id` (closed world: a service manages its own users only). It
+   applies immediately to every live socket of that identity and persists
+   the membership — the hub re-applies it on every reconnect, so the
+   backend does NOT need to re-add after reconnects.
+3. `DELETE /api/groups/{g}/members?user_id=…` — removes (and evicts live
+   sockets immediately).
+4. Errors: unknown group → `404 {error:"group_not_found"}`; missing
+   `user_id` → `400`. Publish to an unregistered group stays lenient
+   for now (`200`, zero subscribers) — the strict `404` story arrives with
+   Phase 2.
 
 Group names are free-form strings today; each lives inside the caller's
 `client_id` partition (see §2), so different services' identical names
@@ -205,7 +219,8 @@ header as well as `?access_token=` (`docs/TECH.md` §2).
 2. Never mock the fence by calling the WS path directly — tokenless handshakes
    get `401` by design.
 3. Don't `skipNegotiation`, don't disable the automatic re-negotiation cycle,
-   and don't build on the `demo` auto-join.
+   and don't build client-side group management — pieces are owned by the
+   backend via the members API (no hub methods exist for clients at all).
 4. There is no hub method to invoke and no client→server frame. Every write
    goes through `/api/*` with a scope check.
 

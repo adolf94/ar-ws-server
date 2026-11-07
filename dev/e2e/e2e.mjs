@@ -146,6 +146,46 @@ try {
   process.exit(1);
 }
 
+// ── groups: POST /api/groups + member add (Phase 1, owner spec) ─────────────
+const authHdrs = { Authorization: `Bearer ${idpToken}`, 'Content-Type': 'application/json' };
+const memberSub = userClaims.sub; // member's client partition = bearer's client_id (owner spec)
+
+const createRes = await fetch(`${SRV}/api/groups`, {
+  method: 'POST', headers: authHdrs,
+  body: JSON.stringify({ name: 'demo' }),
+});
+let createBody = await createRes.json().catch(() => ({}));
+check('G-1. POST /api/groups → created/auto client_id partition',
+  (createRes.status === 201 || createRes.status === 200) && createBody.ok === true
+    && typeof createBody.partition === 'string',
+  `status=${createRes.status} group=${createBody.group} partition=${createBody.partition ?? '?'}`);
+
+const addRes = await fetch(`${SRV}/api/groups/demo/members`, {
+  method: 'POST', headers: authHdrs,
+  body: JSON.stringify({ user_id: memberSub }),
+});
+let addResBody = await addRes.json().catch(() => ({}));
+check('G-2. member add (bearer scopes client_id) → live sockets joined',
+  addRes.status === 200 && addResBody.ok === true && addResBody.connections_joined >= 1,
+  `status=${addRes.status} joined=${addResBody.connections_joined ?? 0}`);
+
+const delRes = await fetch(`${SRV}/api/groups/demo/members?user_id=${encodeURIComponent(memberSub)}`, {
+  method: 'DELETE', headers: { Authorization: `Bearer ${idpToken}` },
+});
+// remove-then-re-add so the fan-out under test below keeps working
+check('G-3. member remove → ok (evicts live sockets)', delRes.status === 200, `status=${delRes.status}`);
+const reAddRes = await fetch(`${SRV}/api/groups/demo/members`, {
+  method: 'POST', headers: authHdrs,
+  body: JSON.stringify({ user_id: memberSub }),
+});
+check('G-4. member re-add → ok', reAddRes.status === 200, `status=${reAddRes.status}`);
+
+const noSuchGroup = await fetch(`${SRV}/api/groups/no-such-group/members`, {
+  method: 'POST', headers: authHdrs,
+  body: JSON.stringify({ user_id: memberSub }),
+});
+check('GATE-2b. member add on unknown group → 404', noSuchGroup.status === 404, `status=${noSuchGroup.status}`);
+
 const publishRes = await fetch(`${SRV}/api/publish`, {
   method: 'POST',
   headers: { Authorization: `Bearer ${idpToken}`, 'Content-Type': 'application/json' },
