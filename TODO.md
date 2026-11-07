@@ -33,15 +33,22 @@
 - [x] `docs/TECH.md` written; README links it
 - [x] `/compact` project command `.opencode/commands/compact.md` — session
   state → TODO.md + handoff log (shadows the built-in in this repo)
-- [ ] **Re-run e2e after the ws-only rewrite (e2e.mjs rewritten but not yet
-  executed again — the 9/9 result predates the rewrite)**
-- [ ] Commit the current state (first commit not made yet)
-- [ ] `dev/run-spike.sh` final smoke (the script's background-service ergonomics
-  caused the first timeouts; works when services are managed externally — see
-  Session log)
+- [x] **Re-run e2e after the ws-only rewrite: 6/6 PASS** (2026-11-07; scope
+  narrowed from 9/9 in pre-rewrite run to server/WS + gates only). Fixed
+  en-route: both cache writers (`mint-token.mjs`, `e2e.mjs`) stored claims
+  but never the raw `access_token`, so `e2e.mjs`'s cache-hit path read
+  `undefined` — cache file is now self-sufficient, and `.idp-token-cache.json`
+  (live bearer token!) added to `.gitignore`
+- [x] Commit (first commit): `e69a2f5` "phase-0 spike: negotiate-issued
+  tokens, real-IdP e2e green" — 24 files; no token cache / .env staged
+- [x] `dev/run-spike.sh` full smoke green (real mode, fresh server on :5000,
+  e2e 6/6). Caveat: script only auto-kills the IdP port in mock mode — port
+  :5000 must be cleared externally first (see Next up)
 
 ### Next up
 
+- [ ] `dev/run-spike.sh`: `fuser -k <SRV port>` in real mode too (currently
+  only the mock-IdP port is cleared; a stale :5000 listener defeats the smoke)
 - [ ] Phase 1 core: registry-driven group membership (connect-time + runtime
   `POST/DELETE /api/groups/{g}/members` by user id), per-service group
   scoping `client_id` (plan R4)
@@ -87,3 +94,14 @@
 run `cd dev/e2e && node mint-token.mjs` (with creds sourced) to warm the
 token cache, re-run `node e2e.mjs` (server-only mode, no authority
 round-trip), confirm green, then `git add -A && git commit -m "phase-0 spike: negotiate-issued tokens, real-IdP e2e green"`.
+
+**Follow-up — 2026-11-07 (later the same day):**
+- All three open Phase-0 items closed: re-written e2e → **6/6 PASS** (cache
+  path, zero authority round-trips); first commit `e69a2f5`;
+  `dev/run-spike.sh` real-mode smoke → 6/6 from a fresh server it started.
+- Bug fixed en-route: cache writers saved claims but no `access_token`, making
+  the cache unusable by `e2e.mjs` (`Bearer undefined` on the next run);
+  token cache added to `.gitignore` before staging.
+- Phase 0 is **done**; next session starts Phase 1 (§Next up) per plan §8.
+- Next action: `fuser -k 5000/tcp 9001/tcp; bash dev/run-spike.sh` → then
+  start Phase 1 group membership work.
