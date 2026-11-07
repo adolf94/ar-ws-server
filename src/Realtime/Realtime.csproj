@@ -20,5 +20,6 @@
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.0" />
     <!-- IdP token verification: docs/INTEGRATION.md's official IdP client -->
     <PackageReference Include="Ar.Auth.OpenId" Version="1.2.0-local" />
+    <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.0" />
   </ItemGroup>
 </Project>

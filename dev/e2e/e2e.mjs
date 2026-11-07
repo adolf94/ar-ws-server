@@ -20,6 +20,8 @@ import { HubConnectionBuilder } from '@microsoft/signalr';
 
 const MODE = process.env.IDP_MODE ?? 'real';
 const SRV = process.env.SRV ?? 'http://localhost:5000';
+// cheap consistency gate: the live OpenAPI doc matches the frozen snapshot
+const CONTRACT_FILE = new URL('../../docs/openapi-v1.json', import.meta.url).pathname;
 const MOCK_AUTH = 'http://localhost:9001';
 const CACHE_FILE = new URL('./.idp-token-cache.json', import.meta.url);
 const PUBLISHER_SCOPE = 'api://ws-server/app:publisher';
@@ -461,6 +463,16 @@ if (freshlyMinted && MODE === 'mock') {
   });
   check('GATE-2. publish without publisher scope → 403', noScope.status === 403, `status=${noScope.status}`);
 }
+
+// ── contract freeze: live OpenAPI matches the frozen snapshot ───────────────
+const contractSnap = JSON.parse(readFileSync(CONTRACT_FILE, 'utf8'));
+const liveDoc = await (await fetch(`${SRV}/openapi/v1.json`)).json();
+const snapPaths = Object.keys(contractSnap.paths ?? {}).sort().join(',');
+const livePaths = Object.keys(liveDoc.paths ?? {}).sort().join(',');
+check('OC-1. live OpenAPI paths == frozen docs/openapi-v1.json',
+  snapPaths === livePaths && snapPaths.includes('/api/publish')
+    && snapPaths.includes('/api/users/{sub}/send') && snapPaths.includes('/healthz'),
+  snapPaths === livePaths ? `${livePaths.split(',').length} paths` : `frozen=[${snapPaths}] live=[${livePaths}]`);
 
 if (String(userClaims.scope ?? '').length === 0) {
   console.log('⚠ cached/env token carries NO scopes — publish scope checks may FAIL; refresh via dev/e2e/mint-token.mjs');

@@ -74,6 +74,12 @@
   same 404/403 scoping, registry-backed `HubCallerContext` aborts)
   — e2e P-1, D-1..D-5. Remaining §5.3: history read/clear (Phase 3
   buffer behind it), `info` — and OpenAPI/contract freeze.
+- [x] §4 contract freeze + OpenAPI (Phase 2 exit gate, plan §8) — done
+  2026-11-07: built-in OpenAPI wired (`AddOpenApi`/`MapOpenApi`,
+  `/openapi/v1.json` live); snapshot `docs/openapi-v1.json` (9 paths);
+  human contract `docs/CONTRACT.md` (security law, envelope, endpoint
+  matrix, scoping one-liners, versioning rule); e2e OC-1 gates the live
+  doc against the snapshot — **mock 43/43, real 33/33**
 - [ ] Phase 3: history ring buffer, metrics, rate limiting, Dockerfile
 - [ ] Phase 4: SPA migration (`centrifuge-js` → `@microsoft/signalr`),
   INTEGRATION.md rewrite (nucleus written: `docs/INTEGRATION.md`, phase-0
@@ -252,3 +258,18 @@ round-trip), confirm green, then `git add -A && git commit -m "phase-0 spike: ne
 - Next action: §4 contract freeze/OpenAPI (the Phase 2 exit gate in plan
   §8), then Phase 3 — history ring buffer (opt-in per group), metrics,
   rate limiting, Dockerfile.
+
+**Follow-up 9 — 2026-11-07 (contract freeze — Phase 2 exit):**
+- OpenAPI wired (built-in `Microsoft.AspNetCore.OpenApi` 10.0.0):
+  `/openapi/v1.json` live machine doc; frozen snapshot
+  `docs/openapi-v1.json` (9 paths); **`docs/CONTRACT.md`** = the human
+  freeze: security law (bearer client_id = one scope key; publisher scope),
+  error envelope, event envelope, 11-endpoint matrix with exact
+  req/resp/errors, the partition-vs-global scoping one-liners, hub-side
+  placement rules, and the freeze policy (additive → extend; breaking → v2
+  at SPA cutover).
+- e2e OC-1 anchors the freeze: live paths must equal the snapshot (no
+  silent contract drift). Lanes: **mock 43/43, real 33/33**.
+- Next action: Phase 3 — history ring buffer (opt-in per group; the
+  read/clear endpoints already specced in CONTRACT), prometheus metrics,
+  fixed-window rate limiting, Dockerfile + compose.

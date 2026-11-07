@@ -115,6 +115,9 @@ builder.Services.AddCors(options => options.AddPolicy("origin-fence", policy => 
     .AllowAnyMethod()
     .SetPreflightMaxAge(TimeSpan.FromMinutes(10))));
 
+// ── API surface (plan §5.3) ─────────────────────────────────────────────────
+builder.Services.AddOpenApi();                    // machine contract: /openapi/v1.json
+
 // ── pipeline ────────────────────────────────────────────────────────────────
 var app = builder.Build();
 
@@ -123,6 +126,7 @@ app.UseAuthentication();          // default scheme handling (challenge cosmetic
 app.UseMiddleware<SecurityFenceMiddleware>(); // the §5.2 two-door fence
 app.UseAuthorization();
 
+app.MapOpenApi();                 // /openapi/v1.json — contract freeze (plan §8 Phase 2 exit)
 app.MapGet("/healthz", () => Results.Ok(new
 {
     ok = true,
