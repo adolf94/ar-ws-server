@@ -38,7 +38,8 @@ app backend (publisher) ─────► POST /api/publish (IdP Bearer + publi
   * **never set `skipNegotiation: true`** — negotiate is the auth entry point.
 * **Connect-time group placement** (hub, after the fence validates): the
   connection joins `user_channel|{sub}` — a cross-service channel reachable
-  regardless of `client_id` (send side lands with Phase 2 unicast) — plus
+  regardless of `client_id` (sends via `POST /api/users/{sub}/send`, §4.1
+  row 6) — plus
   every partition-scoped group the identity was added to via the members
   API (membership is stored server-side and re-applied on every reconnect).
 * The connection JWT is checked only at handshake time. A connection stays
@@ -142,9 +143,15 @@ scope-bearing M2M token works.
 | 3 | Create a group record | `POST /api/groups { name }` → `201 {ok, group, partition}` | ✅ today (2026-11-07) |
 | 4 | Put user into a group | `POST /api/groups/{g}/members { user_id }` | ✅ today — bearer's `client_id` scopes both the group and the member; no client_id in the body, ever |
 | 5 | Remove user from group | `DELETE /api/groups/{g}/members?user_id=…` | ✅ today |
-| 6 | Send to one user (all their connections) | — | ⬜ no endpoint planned (see the §5.3 gap note) |
+| 6 | Send to one user (all connections, any service) | `POST /api/users/{sub}/send { data }` | ✅ today |
 | 7 | Send to one connection | — | ⬜ no endpoint planned |
 | 8 | Disconnect a connection | `POST /api/connections/{id}/disconnect` | ⬜ Phase 2 |
+
+Row 6 is deliberately NOT partition-scoped: it addresses `user_channel|{sub}`
+— the channel every connection joins at connect — so `sub` is the only
+address needed and fan-out ignores which client_id the user connected
+through (e2e SEND-1..4: a send from service A lands on a user connected via
+service B). Same envelope rules; `from` = the calling service's client_id.
 
 Fan-out semantics, server-side:
 

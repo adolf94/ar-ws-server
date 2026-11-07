@@ -150,6 +150,51 @@ try {
 const authHdrs = { Authorization: `Bearer ${idpToken}`, 'Content-Type': 'application/json' };
 const memberSub = userClaims.sub; // member's client partition = bearer's client_id (owner spec)
 
+// ── send to a specific user (Phase 2 unicast, owner spec) ───────────────────
+// Own-token send: lands via user_channel|{sub}, from = caller's client_id.
+received = null;
+const sendRes = await fetch(`${SRV}/api/users/${encodeURIComponent(memberSub ?? '')}/send`, {
+  method: 'POST', headers: authHdrs,
+  body: JSON.stringify({ data: { type: 'notify_receive', message_id: 'snd-1', text: 'direct to user' } }),
+});
+const sendBody = await sendRes.json().catch(() => ({}));
+check('SEND-1. POST /api/users/{sub}/send → 200 ok', sendRes.status === 200 && sendBody.ok === true, `status=${sendRes.status}`);
+await sleep(800);
+check('SEND-2. unicast received (from = caller client_id, stamped)',
+  received?.message_id === 'snd-1' && typeof received?.sent_at === 'string',
+  `received=${JSON.stringify(received)}`);
+
+if (MODE === 'mock') {
+  // THE point of user_channel: sender from a DIFFERENT service partition
+  // still reaches the user — sub is the only address.
+  received = null;
+  const otherToken = await mintMock({ sub: '42', scope: PUBLISHER_SCOPE, client_id: 'other-service' });
+  const crossSendRes = await fetch(`${SRV}/api/users/${encodeURIComponent(memberSub ?? '')}/send`, {
+    method: 'POST', headers: { Authorization: `Bearer ${otherToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data: { type: 'notify_receive', message_id: 'snd-2', text: 'cross-service unicast' } }),
+  });
+  const crossSendBody = await crossSendRes.json().catch(() => ({}));
+  check('SEND-3. cross-service unicast → 200 ok', crossSendRes.status === 200 && crossSendBody.ok === true, `status=${crossSendRes.status}`);
+  await sleep(800);
+  check('SEND-4. cross-service unicast received (from = sender client_id)',
+    received?.message_id === 'snd-2' && received?.from === 'other-service',
+    `received=${JSON.stringify(received)}`);
+}
+
+const sendNoData = await fetch(`${SRV}/api/users/${encodeURIComponent(memberSub ?? '')}/send`, {
+  method: 'POST', headers: { Authorization: `Bearer ${idpToken}`, 'Content-Type': 'application/json' },
+  body: JSON.stringify({}),
+});
+check('GATE-3. send with no data → 400', sendNoData.status === 400, `status=${sendNoData.status}`);
+
+const sendAnon = await fetch(`${SRV}/api/users/${encodeURIComponent(memberSub ?? '')}/send`, {
+  method: 'POST', headers: { 'Content-Type': 'application/json' },
+  body: JSON.stringify({ data: { type: 'notify_receive', text: 'x' } }),
+});
+check('GATE-3b. unauthenticated send → 401', sendAnon.status === 401, `status=${sendAnon.status}`);
+
+ // member's client partition = bearer's client_id (owner spec)
+
 const createRes = await fetch(`${SRV}/api/groups`, {
   method: 'POST', headers: authHdrs,
   body: JSON.stringify({ name: 'demo' }),

@@ -60,15 +60,13 @@
   Connect-time + runtime verified: e2e G-1..4, GATE-2b, PART-1..4 —
   mock lane 18/18, real lane 13/13. Remaining Phase 1 polish: group
   listing/counts endpoint (data exists in `IGroupRegistry`).
-- [ ] Phase 2: broadcast, presence, info endpoints; full contract + OpenAPI
-  — **fold in the plan §5.3 gap surfaced writing `docs/INTEGRATION.md`**:
-  add send-to-user (`/api/users/{sub}/send`) and
-  send-to-connection (`/api/connections/{id}/send`) to §5.3 (fan-out
-  primitives already exist server-side; no HTTP route is planned)
-  → there, design the owner's **global user channel** `user_channel|{sub}`
-  (server auto-join on connect, cross-`client_id` unicast regardless of
-  which service the user is connected through — deferred from the 2026-11-07
-  partitioning session; needs its own scope decision on who may fan out)
+- [ ] Phase 2: broadcast, presence/info endpoint, group listing/counts; full
+  contract + OpenAPI. §5.3 unicast gap **half closed 2026-11-07**:
+  ✅ send-to-user (`POST /api/users/{sub}/send`, user_channel — e2e SEND-1..4
+  incl. cross-service delivery); ⬜ send-to-connection
+  (`/api/connections/{id}/send`) still unplanned — owner decision whether
+  the HTTP route is needed (per-socket delivery is also reachable via
+  `Clients.Client` hub-side)
 - [ ] Phase 3: history ring buffer, metrics, rate limiting, Dockerfile
 - [ ] Phase 4: SPA migration (`centrifuge-js` → `@microsoft/signalr`),
   INTEGRATION.md rewrite (nucleus written: `docs/INTEGRATION.md`, phase-0
@@ -179,3 +177,22 @@ round-trip), confirm green, then `git add -A && git commit -m "phase-0 spike: ne
   13/13** — commit `50772c5` (partitioning) + this follow-up's commit.
 - Next action: Phase 2 — broadcast, presence/counts, the §5.3 unicast gap
   (`POST /api/groups` listing can ride the existing `IGroupRegistry`).
+
+**Follow-up 5 — 2026-11-07 (send-to-user / user_channel unicast):**
+- `POST /api/users/{sub}/send { data }` live — cross-service unicast per
+  owner spec: routes to `user_channel|{sub}` (joined at connect), so `sub`
+  alone reaches the user on every device THROUGH ANY service's client_id.
+  Same envelope (`data.type` + server-stamped `from` = caller's client_id,
+  `sent_at`); publisher policy governs for now (narrower `users:write`
+  scope = one-line change later, recorded decision space).
+  UserChannelKey bypasses publish partitioning by construction
+  (reserved `user_channel` pseudo-partition; client_ids claiming that name
+  are boxed into the `server` partition).
+- e2e SEND-1..4 + GATE-3/3b: own-token delivery, **cross-service delivery
+  (sender `other-service` → user of `spa-demo-client`)**, 400 no-data,
+  401 anon. Lanes: **mock 24/24, real 17/17**.
+- Remaining §5.3 gap: send-to-connection endpoint only (owner decision;
+  hub-side `Clients.Client` already works internally).
+- Next action: Phase 2 — broadcast + group listing/counts + presence
+  (`IGroupRegistry` already holds the counts source), then §4 contract
+  freeze/OpenAPI.

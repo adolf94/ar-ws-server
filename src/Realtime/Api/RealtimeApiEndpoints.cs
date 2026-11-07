@@ -20,14 +20,21 @@ namespace Realtime.Api;
 /// errors (plan R8). The bearer's verified <c>client_id</c> is the ONE scope
 /// key (plan R4, owner spec 2026-11-07): it partitions POST /api/groups,
 /// the members endpoints, and POST /api/publish; group membership is closed
-/// to the caller's own users (cross-service fan-out is the user channel,
-/// Phase 2). Members arrive 2026-11-07; presence/history in Phases 2–3.
+/// to the caller's own users. Cross-service unicast is the exception:
+/// POST /api/users/{sub}/send addresses the global <c>user_channel|{sub}</c>
+/// (owner spec: "send data to the user regardless of client_id"), governed
+/// by the same publisher policy for now. History/presence in Phases 2–3.
 /// </summary>
 public static class RealtimeApiEndpoints
 {
     public sealed class PublishRequest
     {
         public string? Group { get; set; }
+        public JsonElement Data { get; set; }
+    }
+
+    public sealed class SendUserRequest
+    {
         public JsonElement Data { get; set; }
     }
 
@@ -75,6 +82,35 @@ public static class RealtimeApiEndpoints
 
                 await hubContext.Clients.Group(partitioner.Physical(partition, request.Group)).SendAsync("event", data);
                 return Results.Ok(new { ok = true, group = request.Group, partition });
+            });
+
+        // ── POST /api/users/{sub}/send — cross-service unicast (owner spec,
+        // 2026-11-07): addresses the global user_channel|{sub} joined at
+        // connect, so the sub is the ONLY address needed and fan-out ignores
+        // which client_id the user connected through. Same envelope rules;
+        // `from` = the CALLING service's client_id. No store-and-forward.
+        endpoints.MapPost("/users/{sub}/send",
+            [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
+            async (string sub, SendUserRequest request, HttpContext http,
+                IHubContext<RealtimeHub> hubContext, IGroupPartitioner partitioner) =>
+            {
+                if (string.IsNullOrWhiteSpace(sub))
+                    return Results.BadRequest(new { error = "user_id_required", detail = "route user_id (sub) is required" });
+
+                if (request.Data.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+                    return Results.BadRequest(new { error = "data_required", detail = "body.data carries the event (plan §5.3)" });
+
+                var data = JsonNode.Parse(request.Data.GetRawText());
+                if (data is null)
+                    return Results.BadRequest(new { error = "data_invalid", detail = "body.data must be a JSON value" });
+
+                data["from"] = (string?)http.User.GetClientId() ?? "server";
+                data["sent_at"] = DateTime.UtcNow.ToString("o");
+
+                // NOT partition-scoped with the caller's client: the channel
+                // deliberately spans every service the user connects through.
+                await hubContext.Clients.Group(partitioner.UserChannelKey(sub)).SendAsync("event", data);
+                return Results.Ok(new { ok = true, user_id = sub });
             });
 
         // ── POST /api/groups — create a group record, auto-scoped to the

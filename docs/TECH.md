@@ -192,6 +192,7 @@ latest server/WS-only run: 8/8 PASS with hub identity verified
 | `POST /api/groups` `{name}` | ✅ 2026-11-07 | create group record, auto-scoped to bearer's partition; idempotent |
 | `POST /api/groups/{g}/members` `{user_id}` | ✅ 2026-11-07 | bearer's client_id scopes group + member; applies live + persists |
 | `DELETE /api/groups/{g}/members?user_id=…` | ✅ 2026-11-07 | same scoping; evicts live sockets |
+| `POST /api/users/{sub}/send` `{data}` | ✅ 2026-11-07 | cross-service unicast via `user_channel|{sub}`; NOT partition-scoped by design |
 | `GET /api/groups[/presence|/history]` | ⬜ Phase 2 | presence + ring-buffer history (+ group listing with counts) |
 | Prometheus metrics, rate limiting | ⬜ Phase 3 | |
 | Dockerfile + prod compose + Caddy route | ⬜ Phase 5 | single route, no bus/wall split |
