@@ -412,5 +412,8 @@ round-trip), confirm green, then `git add -A && git commit -m "phase-0 spike: ne
   pending — docs are under live owner condensation; a client-libraries
   pointer landed in README instead.
 - Next: Phase 5 — deploy compose + Caddy single route; decommission the
-  wall. (Owner WIP in the tree right now: fence origin-check edits + docs
-  condensation — do not disturb.)
+  wall.
+- Phase 4 exit verification (owner fence commit `f16763e` included):
+  full client sweep green — ts 12 gates ALL PASS, dotnet 8/8, python 8/8 —
+  and both e2e lanes re-verified: mock 54/54, real 42/42. Phase 4 CLOSED.
+  (Owner's doc condensation still uncommitted in the tree — left as-is.)
