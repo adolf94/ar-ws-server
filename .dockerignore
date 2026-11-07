@@ -1,0 +1,10 @@
+**/bin/
+**/obj/
+.git/
+docs/
+dev/
+TODO.md
+README.md
+.idp-token-cache.json
+.gitignore
+docker-compose.yml

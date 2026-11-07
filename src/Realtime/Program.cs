@@ -14,6 +14,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Primitives;
 using Microsoft.IdentityModel.Tokens;
+using Prometheus;                 // plan §3 ops: /metrics
 using Realtime.Api;
 using Realtime.Auth;
 using Realtime.Connections;
@@ -183,10 +184,12 @@ var app = builder.Build();
 app.UseCors("origin-fence");      // must precede the fence: preflights terminate here
 app.UseAuthentication();          // default scheme handling (challenge cosmetics)
 app.UseMiddleware<SecurityFenceMiddleware>(); // the §5.2 two-door fence (+ eager auth for rate limiting)
+app.UseHttpMetrics();             // prometheus-net: HTTP + runtime collectors (+ WS-aware)
 app.UseRateLimiter();             // §9: partitions need context.User set by the fence
 app.UseAuthorization();
 
 app.MapOpenApi();                 // /openapi/v1.json — contract freeze (plan §8 Phase 2 exit)
+app.MapMetrics("/metrics");       // prometheus-net scrape endpoint (plan §3: ops)
 app.MapGet("/healthz", () => Results.Ok(new
 {
     ok = true,

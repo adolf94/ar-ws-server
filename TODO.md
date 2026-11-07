@@ -87,8 +87,11 @@
   respected and 404s; snapshot re-frozen → now **10 paths**, OC-1 red-on-drift
   proved itself when it caught the new route pre-freeze). Also ✅ rate
   limiting (**done 2026-11-07**, see Follow-up 11): fixed window per
-  `client_id`, two lane ceilings, e2e RL-1..4. Remaining Phase 3:
-  prometheus metrics, Dockerfile + compose
+  `client_id`, two lane ceilings, e2e RL-1..4. ✅ Prometheus metrics
+  (**done 2026-11-07** — Follow-up 12): prometheus-net, `/metrics`,
+  e2e MC-1. Remaining Phase 3: Dockerfile + compose (**done
+  2026-11-07** — Follow-up 13: `Dockerfile` + `docker-compose.yml` +
+  `dev/build-image.sh`; real-lane e2e green against the container: 42/42)
 - [ ] Phase 4: SPA migration (`centrifuge-js` → `@microsoft/signalr`),
   INTEGRATION.md rewrite (nucleus written: `docs/INTEGRATION.md`, phase-0
   contract — extend as Phases 1–3 land)
@@ -330,3 +333,43 @@ round-trip), confirm green, then `git add -A && git commit -m "phase-0 spike: ne
   listener before boot (bit us twice across lanes today).
 - Next action: Phase 3 rest — prometheus metrics (`prometheus-net`,
   `/metrics`), Dockerfile + compose; then Phase 4 SPA migration.
+
+**Follow-up 12 — 2026-11-07 (Prometheus metrics — Phase 3 ops done):**
+- `prometheus-net.AspNetCore` 8.2.1 wired: `app.UseHttpMetrics()` (HTTP
+  collectors + runtime: `dotnet_collection_count_total`,
+  `dotnet_total_memory_bytes`, `http_requests_received_total`,
+  `http_request_duration_seconds`) and `app.MapMetrics("/metrics")`.
+  Middleware order: after the fence, before UseRateLimiter.
+- Placement decision: `/metrics` is OUTSIDE the `/api` group → no bearer,
+  no publisher scope, NOT rate-limited (a scraper must never consume a
+  client's budget) and deliberately not in the frozen OpenAPI snapshot
+  (scrape surface is prometheus-text-versioned, not a JSON-API path) —
+  OC-1 stays green without re-freeze; CONTRACT §4 row + exclusion note.
+  Deploy: bind the scrape endpoint to the internal network only (Phase 5
+  compose).
+- e2e MC-1 (before OC-1): 200 + text/plain 0.0.4 + the three stable
+  collector families present. Lanes: **mock 51/51, real 42/42** (RL-2/RL-4
+  skip on cache-hit tokens — mint-only checks).
+- Next action: Dockerfile + docker-compose (phase-5-shaped, so the Phase 4
+  SPA migration runs against the containerized server), then Phase 4 SPA
+  migration (`@microsoft/signalr`) against the frozen v1 contract.
+
+**Follow-up 13 — 2026-11-07 (containerized shape — Phase 3 exit done):**
+- `Dockerfile`: multi-stage (sdk:10.0 build → aspnet:10.0 runtime);
+  `prometheus-net.AspNetCore` + `Ar.Auth.OpenId` 1.2.0-local restore via a
+  vendored feed: `nuget-feed/` (gitignored, staged by `dev/build-image.sh`
+  from the sibling repo's `../local-nuget`) + `docker/NuGet.docker.config`
+  override; dependency layer cached off `Realtime.csproj`.
+- `docker-compose.yml`: one service (`realtime`), the full 12-factor env
+  surface from TECH §5 (rates, TTL, origins, authority), restart policy,
+  healthcheck `curl /healthz` (runtime base ships no wget — curl installed
+  in the runtime stage; YAML trap: `${VAR:?msg}` with colons must be
+  quoted). `CONN_TOKEN_SECRET` is the only secret, compose-required.
+- `OC-1 passed UNCHANGED` from inside the container (10 paths — /metrics
+  deliberately not a documented API path).
+- **Full real-lane e2e against the container: 42/42** (fresh token, real
+  authority) — including the RL rate-limit bursts and MC-1 metrics scrape.
+- Phase 3 done (history ✓ rate limiting ✓ metrics ✓ container ✓). Next:
+  Phase 4 — SPA migration `centrifuge-js` → `@microsoft/signalr`,
+  INTEGRATION.md rewrite against the frozen v1 contract; then Phase 5
+  deploy compose (Caddy edge) + decommission the wall.

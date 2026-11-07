@@ -505,6 +505,22 @@ if (freshlyMinted && MODE === 'mock') {
   check('GATE-2. publish without publisher scope → 403', noScope.status === 403, `status=${noScope.status}`);
 }
 
+// ── metrics: prometheus scrape surface (plan §3 ops) ────────────────────────
+// Deliberately OUTSIDE the /api group: no bearer, no scope, not rate-limited
+// (a scraper must never trip a client's budget). Expose it only on the
+// internal network (deploy compose binds it per Phase 5).
+{
+  const res = await fetch(`${SRV}/metrics`);
+  const body = await res.text();
+  const contentType = res.headers.get('content-type') ?? '';
+  check('MC-1. GET /metrics → prometheus scrape (text/plain, runtime + http collectors)',
+    res.status === 200 && contentType.includes('text/plain')
+      && body.includes('dotnet_total_memory_bytes')
+      && body.includes('http_requests_received_total')
+      && body.includes('http_request_duration_seconds'),
+    `status=${res.status} ct=${contentType} lines=${body.split('\n').length}`);
+}
+
 // ── contract freeze: live OpenAPI matches the frozen snapshot ───────────────
 const contractSnap = JSON.parse(readFileSync(CONTRACT_FILE, 'utf8'));
 const liveDoc = await (await fetch(`${SRV}/openapi/v1.json`)).json();

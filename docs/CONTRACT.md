@@ -87,6 +87,13 @@ at send time — no store-and-forward (history buffer: Phase 3).
 | `GET /api/groups/{g}/history?limit=` | Bearer+scope | `?limit` (1..10 000, default 100) | `{ok, group, group_partition, history_enabled, total, history:[event…]}` — ascending tail over non-expired entries | 404 group_not_found |
 | `DELETE /api/groups/{g}/history` | Bearer+scope | — | `{ok, group, group_partition, cleared}` (disabled buffer → `cleared:0`) | 404 group_not_found |
 | `GET /healthz` / `GET /openapi/v1.json` | none | — | config probe / spec | — |
+| `GET /metrics` | none | — | Prometheus text format (0.0.4) — HTTP + runtime collectors (`prometheus-net`) | — |
+
+(Added 2026-11-07: `/metrics` is deliberately NOT part of the frozen
+OpenAPI snapshot — it is a scrape surface in Prometheus text format
+versioned by prometheus-net, not a JSON-API path; OC-1 guards the ten
+documented paths and stays green. Expose the unauthenticated scrape
+endpoint only on the internal network.)
 
 Scoping laws, one line each:
 

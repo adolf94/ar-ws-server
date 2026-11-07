@@ -1,0 +1,42 @@
+# ── realtime server (Phase 3 shape) ─────────────────────────────────────────
+# One container, one process, two doors (plan §1). Phase 5 extends this with
+# the Caddy edge route + wall decommission; the knobs below are the 12-factor
+# surface from docs/TECH.md §5.
+#
+#   docker compose up -d realtime
+#   curl http://localhost:5000/healthz
+#
+# Secrets: CONN_TOKEN_SECRET may be overridden (rotate = live conns
+# re-negotiate, no IdP impact). Never place client secrets here.
+
+services:
+  realtime:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: realtime:latest
+    container_name: realtime
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      ASPNETCORE_ENVIRONMENT: Production
+      ASPNETCORE_URLS: http://0.0.0.0:5000
+      # IdP (real authority; the offline mock lane is a host-side dev tool, §6)
+      AUTH_AUTHORITY: https://auth.adolfrey.com/api/
+      AUTH_AUDIENCE: ""                 # empty = issuer-only trust
+      PUBLISH_REQUIRED_SCOPE: api://ws-server/app:publisher
+      ALLOWED_ORIGINS: http://localhost:3000,https://*.adolfrey.com
+      # in-process connection-token key (the ONLY secret)
+      CONN_TOKEN_SECRET: "${CONN_TOKEN_SECRET:?generate one - openssl rand -hex 32}"
+      CONN_TOKEN_TTL: "300"
+      # §9 rate limiting
+      RATE_WINDOW_SECONDS: "60"
+      RATE_MAX_PER_WINDOW: "60"
+      RATE_SEND_PER_WINDOW: "600"
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:5000/healthz"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

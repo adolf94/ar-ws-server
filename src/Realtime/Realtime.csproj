@@ -21,5 +21,6 @@
     <!-- IdP token verification: docs/INTEGRATION.md's official IdP client -->
     <PackageReference Include="Ar.Auth.OpenId" Version="1.2.0-local" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.0" />
+    <PackageReference Include="prometheus-net.AspNetCore" Version="8.2.1" />
   </ItemGroup>
 </Project>

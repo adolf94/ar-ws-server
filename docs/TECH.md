@@ -134,12 +134,15 @@ misbehaves.
 | `dev/e2e/e2e.mjs` | See §6. |
 | `dev/e2e/mint-token.mjs` | Refreshes the e2e token cache without running tests. |
 | `dev/run-spike.sh` | Boots (mock|real) stack and runs the e2e. |
+| `dev/build-image.sh` | Stages the vendored `nuget-feed/` nupkg + `docker build`. |
+| `Dockerfile` + `docker-compose.yml` | Phase-3 containerized shape (§9): sdk-10.0 multi-stage publish, `nuget-feed/` override, healthcheck via `curl /healthz`. |
 
 Runtime packages: `Ar.Auth.OpenId` 1.2.0-local from the `ar-auth` sibling
 repo's local NuGet feed (`NuGet.config`; 1.2.0 fixes http-authority discovery
 for the mock IdP lane — `ArAuthClient` now sets
 `HttpDocumentRetriever.RequireHttps` based on the authority scheme),
-`Microsoft.AspNetCore.Authentication.JwtBearer` 10.0.0.
+`Microsoft.AspNetCore.Authentication.JwtBearer` 10.0.0,
+`prometheus-net.AspNetCore` 8.2.1 (`/metrics`, HTTP + runtime collectors).
 SignalR itself ships in the shared framework.
 
 ## 5 · Configuration (environment)
@@ -185,8 +188,8 @@ lanes): negotiate injects `accessToken` (shape a) · handshake consumes it
 (proven real by the WS-gate negatives) · publish/broadcast/unicast/group
 ops/history/presence/disconnect + partition/privacy · unauthenticated and
 scope-less negatives (401/403) · contract freeze drift gate (OC-1) · rate
-limiting (429 + `Retry-After`, per-lane ceilings — RL-1..4). Latest: mock
-53/53, real 41/41.
+limiting (429 + `Retry-After`, per-lane ceilings — RL-1..4) · metrics scrape
+(MC-1). Latest: mock 51/51, real 42/42.
 
 ## 7 · Public surface (implemented vs planned)
 
@@ -206,9 +209,9 @@ limiting (429 + `Retry-After`, per-lane ceilings — RL-1..4). Latest: mock
 | `GET /api/groups` | ✅ 2026-11-07 | partition-private listing: `members` (persisted) + `online` (live identities) |
 | `GET /api/groups/{g}/presence` | ✅ 2026-11-07 | per-member identity rows decoded from physical keys; online + socket count |
 | `GET /api/groups/{g}/history` · `/history` clear | ✅ 2026-11-07 (Phase 3) | opt-in ring at group create (`history`, `history_size` ≤ 10 000, `history_ttl_seconds`); ascending tail + `total`; clear → `cleared:n` (disabled → 0) |
-| Prometheus metrics | ⬜ Phase 3 | |
+| Prometheus metrics | ✅ 2026-11-07 | `prometheus-net.AspNetCore`: HTTP + runtime collectors; `GET /metrics` (text/plain 0.0.4); outside the /api group — unauthenticated, unrate-limited (scrape-safe); e2e MC-1 |
 | Rate limiting (fixed window per `client_id`) | ✅ 2026-11-07 | two lane ceilings (default 60/min; unicast send lanes 600/min); 429 `{error:"rate_limited"}` + `Retry-After`; e2e RL-1..4 |
-| Dockerfile + prod compose + Caddy route | ⬜ Phase 5 | single route, no bus/wall split |
+| Dockerfile + prod compose + Caddy route | ✅ compose base 2026-11-07 (Follow-up 13; container e2e 42/42) | Phase 5 adds the Caddy edge + wall decommission |
 
 Event wire convention (unchanged from the wall): the emitted event's identity
 is `data.type` (`chat_receive`, `ai_emission`, …), delivered as SignalR
@@ -224,14 +227,31 @@ ignore unknown types.
   live: `POST /api/groups` + members ops with stored, reconnect-surviving
   membership (e2e G-1..G-4 + GATE-2b). Remaining: group listing/counts,
   presence, broadcast (Phase 2).
-* In-memory registry + root hub logging only: single process, no metrics.
+* In-memory registry + root hub logging only: single process. (`/metrics`
+  is live — Phase 3.)
 * The publisher scope lane's 403 negative test runs only in mock mode (the
   real IdP's `speedtest` client carries the publisher scope unconditionally).
-* No metrics, no persistence — deliberately out of Phase-0 scope. History
-  is live (Phase 3); rate limiting is fixed-window per `client_id`,
-  no persistence of counters across restarts (a restart resets budgets).
+* No persistence — single process, deliberate spike scope. History is live
+  (Phase 3); rate limiting is fixed-window per `client_id` with no counter
+  persistence across restarts; metrics are scrape-live (`/metrics`) but
+  unauthenticated by design — bind it to the internal network at deploy
+  (Phase 5 compose).
 
 ## 9 · Deployment shape (target, Phase 5)
+
+```bash
+bash dev/build-image.sh                       # stages nuget-feed/ then docker build
+CONN_TOKEN_SECRET=$(openssl rand -hex 32) docker compose up -d realtime
+docker inspect --format '{{.State.Health.Status}}' realtime   # → healthy
+```
+
+Verified 2026-11-07: image builds, container reaches the REAL IdP authority,
+and the full real-lane e2e passes against the running container (42/42 incl.
+OC-1 contract gate + MC-1 metrics gate). The offline mock lane is a host-side
+dev tool (`dev/mock-idp` on localhost:9001) — inside the container the
+authority stays the real one (§5). `CONN_TOKEN_SECRET` is the only secret;
+rotation invalidates live connection tokens (clients re-negotiate: the IdP
+path stays untouched → no IdP rotation impact).
 
 * One container; single reverse-proxy route (`handle_path /websockets/*` —
   name TBD) to one upstream. No bus/wall split, no Cloudflare-Access
