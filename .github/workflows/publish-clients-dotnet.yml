@@ -30,28 +30,30 @@ jobs:
         with:
           dotnet-version: '10.0.x'
 
-      # The client depends on Ar.Auth.OpenId (pin: published 1.2.1). The repo
-      # NuGet.config's local-nuget source is a dev-only absolute path, so CI
-      # generates its own config here: nuget.org + a feed staged from the
-      # published GitHub Packages artifact (same fetch as the server build).
-      - name: Stage auth feed (Ar.Auth.OpenId from GitHub Packages)
+      # The client depends on Ar.Auth.OpenId (published 1.2.1 from
+      # adolf94/ar-oauth2). The repo-root NuGet.config's local-nuget source is
+      # a dev-only absolute path (missing on runners), so CI generates the
+      # project-level config: nuget.org + GitHub Packages, credentials from
+      # the workflow token. dotnet restore inside pack resolves from GPR
+      # directly — no vendored feed needed on the runner.
+      - name: Configure NuGet sources (GitHub Packages)
         env:
           TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          version="1.2.1"
-          mkdir -p auth-feed
-          curl --fail-with-body --show-error --silent --location \
-               -u "adolf94:${TOKEN}" -H 'Accept: application/octet-stream' \
-               "https://nuget.pkg.github.com/adolf94/download/ar.auth.openid/${version}/ar.auth.openid.${version}.nupkg" \
-               -o "auth-feed/Ar.Auth.OpenId.${version}.nupkg"
-          cat > NuGet.config <<'XML'
+          cat > NuGet.config <<XML
           <configuration>
             <packageSources>
               <clear />
               <add key="nuget.org" value="https://api.nuget.org/v3/index.json" />
-              <add key="auth-feed" value="auth-feed" />
+              <add key="github" value="https://nuget.pkg.github.com/adolf94/index.json" />
             </packageSources>
+            <packageSourceCredentials>
+              <github>
+                <add key="Username" value="adolf94" />
+                <add key="ClearTextPassword" value="${TOKEN}" />
+              </github>
+            </packageSourceCredentials>
           </configuration>
           XML
         working-directory: clients/dotnet
