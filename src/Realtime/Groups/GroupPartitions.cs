@@ -29,6 +29,10 @@ public interface IGroupPartitioner
     /// only reaches its own client's sockets (owner spec, 2026-11-07).</summary>
     string IdentityPartition(string physicalUserKey);
 
+    /// <summary>The subject encoded inside a physical user identity
+    /// (<c>{client_id}|{sub}</c>) — presence rows want a readable user id.</summary>
+    string IdentitySubject(string physicalUserKey);
+
     /// <summary>The partition a principal speaks/reads in ("server" if the token has none).</summary>
     string PartitionOf(ClaimsPrincipal principal);
 }
@@ -52,6 +56,12 @@ public sealed class GroupPartitioner : IGroupPartitioner
         // '|' itself is always escaped by Physical(), so the first '|' IS
         // the separator; anything malformed boxes into a foreign bucket
         return sep < 0 ? $"__malformed/{physicalUserKey}" : Uri.UnescapeDataString(physicalUserKey[..sep]);
+    }
+
+    public string IdentitySubject(string physicalUserKey)
+    {
+        var sep = physicalUserKey.IndexOf('|');
+        return sep < 0 ? "" : Uri.UnescapeDataString(physicalUserKey[(sep + 1)..]);
     }
 
     public string PartitionOf(ClaimsPrincipal principal)

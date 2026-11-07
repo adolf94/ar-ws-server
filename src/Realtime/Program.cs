@@ -62,6 +62,7 @@ var connSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(connSecret)
 builder.Services.AddSingleton<IConnectionTokenService>(new ConnectionTokenService(connSigningKey, connTokenTtl));
 builder.Services.AddSingleton<IConnectionRegistry, InMemoryConnectionRegistry>();
 builder.Services.AddSingleton<IGroupRegistry, InMemoryGroupRegistry>();
+builder.Services.AddSingleton<IConnectionAborts, InMemoryConnectionAborts>();
 builder.Services.AddSingleton<IGroupPartitioner, GroupPartitioner>();   // plan R4 namespaces
 builder.Services.AddSingleton<IUserIdProvider, SubUserIdProvider>();
 builder.Services.AddSingleton<IAuthorizationHandler>(new PublisherScopeHandler(publishScope));

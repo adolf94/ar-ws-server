@@ -69,8 +69,11 @@
   reverse index, `IGroupPartitioner.IdentityPartition` decodes the target's
   partition). Also ✅ 2026-11-07: broadcast (one wire pass, unknown groups
   reported) + `GET /api/groups` (partition-private, members/online counts)
-  — e2e BC-0..3, G-5..G-7. Remaining §5.3: per-group presence feed,
-  history read/clear, `info`, disconnect endpoint.
+  — e2e BC-0..3, G-5..G-7 + presence (`GET /api/groups/{g}/presence`,
+  decoded identity rows) + disconnect (`POST /api/connections/{id}/disconnect`,
+  same 404/403 scoping, registry-backed `HubCallerContext` aborts)
+  — e2e P-1, D-1..D-5. Remaining §5.3: history read/clear (Phase 3
+  buffer behind it), `info` — and OpenAPI/contract freeze.
 - [ ] Phase 3: history ring buffer, metrics, rate limiting, Dockerfile
 - [ ] Phase 4: SPA migration (`centrifuge-js` → `@microsoft/signalr`),
   INTEGRATION.md rewrite (nucleus written: `docs/INTEGRATION.md`, phase-0
@@ -233,3 +236,19 @@ round-trip), confirm green, then `git add -A && git commit -m "phase-0 spike: ne
   Lanes: **mock 36/36, real 27/27**.
 - Next action: Phase 2 tail — per-group presence feed, `info`, disconnect,
   history edge cases → then §4 contract freeze/OpenAPI before Phase 4.
+
+**Follow-up 8 — 2026-11-07 (presence + disconnect — Phase 2 tail done):**
+- `GET /api/groups/{g}/presence`: rows decoded from physical keys
+  (`{client_id}|{sub}`) via new `IGroupPartitioner.IdentitySubject`;
+  `online` + `connections` read live. Unknown group → 404. Membership
+  persists across disconnects (identity row stays, `online` flips false —
+  D-4).
+- `POST /api/connections/{id}/disconnect`: same partition scoping as
+  send-to-connection (404 unknown / 403 foreign). `IHubContext` cannot
+  abort sockets → new `Connections/ConnectionAborts.cs` tracks each
+  connection's `HubCallerContext` at connect, aborts on demand.
+- e2e P-1, D-1 (foreign disconnect → 403), D-2..D-5.
+  Lanes: **mock 42/42, real 32/32**.
+- Next action: §4 contract freeze/OpenAPI (the Phase 2 exit gate in plan
+  §8), then Phase 3 — history ring buffer (opt-in per group), metrics,
+  rate limiting, Dockerfile.

@@ -147,6 +147,58 @@ public static class RealtimeApiEndpoints
                 return Results.Ok(new { ok = true, partition, groups = listing });
             });
 
+        // ── GET /api/groups/{g}/presence — who is in the group right now:
+        // one row per persisted member identity, decoded from the physical
+        // keys ({client_id}|{sub}), with live socket state. Closed world:
+        // members were only ever enrollable in the caller's own partition.
+        endpoints.MapGet("/groups/{group}/presence",
+            [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
+            (string group, HttpContext http, IGroupRegistry groups,
+                IConnectionRegistry connections, IGroupPartitioner partitioner) =>
+            {
+                var partition = partitioner.PartitionOf(http.User);
+                if (!groups.Exists(partition, group))
+                    return Results.NotFound(new { error = "group_not_found", detail = "group does not exist in this partition" });
+
+                var presence = groups.List(partition)
+                    .Where(g => g.Group == group)
+                    .SelectMany(g => g.Members)
+                    .Select(key => new
+                    {
+                        user_id = partitioner.IdentitySubject(key),
+                        client_id = partitioner.IdentityPartition(key),
+                        online = connections.ConnectionsFor(key).Count > 0,
+                        connections = connections.ConnectionsFor(key).Count,
+                    })
+                    .OrderBy(p => p.user_id, StringComparer.Ordinal)
+                    .ToList();
+                return Results.Ok(new { ok = true, group, group_partition = partition, presence });
+            });
+
+        // ── POST /api/connections/{id}/disconnect — force-close a socket
+        // (plan §5.3), the SAME partition scoping as send-to-connection:
+        // 404 unknown, 403 foreign. Registry + aborts resolve the authority.
+        endpoints.MapPost("/connections/{id}/disconnect",
+            [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
+            (string id, HttpContext http, IConnectionRegistry connections,
+                IConnectionAborts aborts, IGroupPartitioner partitioner) =>
+            {
+                if (string.IsNullOrWhiteSpace(id))
+                    return Results.BadRequest(new { error = "connection_id_required", detail = "route connection id is required" });
+
+                if (!connections.TryGetUser(id, out var identityKey))
+                    return Results.NotFound(new { error = "connection_not_found", detail = "no live connection with this id in this process" });
+
+                var partition = partitioner.PartitionOf(http.User);
+                if (partitioner.IdentityPartition(identityKey) != partition)
+                    return Results.Json(
+                        new { error = "connection_not_in_partition", detail = "target connection belongs to another client_id partition" },
+                        statusCode: StatusCodes.Status403Forbidden);
+
+                var aborted = aborts.TryAbort(id);
+                return Results.Ok(new { ok = true, connection_id = id, connection_partition = partition, aborted });
+            });
+
         // ── POST /api/users/{sub}/send — cross-service unicast (owner spec,
         // 2026-11-07): addresses the global user_channel|{sub} joined at
         // connect, so the sub is the ONLY address needed and fan-out ignores

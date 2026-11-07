@@ -125,6 +125,7 @@ misbehaves.
 | `src/Realtime/Hubs/RealtimeHub.cs` | WS lifecycle: connect/disconnect registry registration; applies stored group membership + `user_channel|{sub}` at connect (no auto-join); `event` is the only fan-out method. |
 | `src/Realtime/Negotiate/SecurityFenceMiddleware.cs` | The fence (§3 above). |
 | `src/Realtime/Api/RealtimeApiEndpoints.cs` | Server API: `POST /api/publish` — Bearer + publisher scope, `data`-only convention, `from`/`sent_at` stamping. |
+| `src/Realtime/Connections/ConnectionAborts.cs` | Tracks live `HubCallerContext`s so the server API can force-close a socket (`POST /api/connections/{id}/disconnect`). |
 | `dev/mock-idp/server.js` | Offline mock IdP (copied from the wall repo, dependency-free; adds an OIDC discovery doc for Ar.Auth). Fallback only. |
 | `dev/e2e/e2e.mjs` | See §6. |
 | `dev/e2e/mint-token.mjs` | Refreshes the e2e token cache without running tests. |
@@ -196,7 +197,8 @@ latest server/WS-only run: 8/8 PASS with hub identity verified
 | `POST /api/connections/{id}/send` `{data}` | ✅ 2026-11-07 | per-socket send, PARTITION-scoped: caller reaches only its own client's sockets (404 unknown / 403 foreign) |
 | `POST /api/broadcast` `{groups[], data}` | ✅ 2026-11-07 | one wire pass across groups; unknown groups reported (caller's partition only) |
 | `GET /api/groups` | ✅ 2026-11-07 | partition-private listing: `members` (persisted) + `online` (live identities) |
-| `GET /api/groups/{g}/presence` · `/history` | ⬜ Phase 2/3 | presence feed + ring-buffer history |
+| `GET /api/groups/{g}/presence` | ✅ 2026-11-07 | per-member identity rows decoded from physical keys; online + socket count |
+| `GET /api/groups/{g}/history` · `/history` clear | ⬜ Phase 3 | ring-buffer (read + clear) behind Phase 3's opt-in buffer |
 | Prometheus metrics, rate limiting | ⬜ Phase 3 | |
 | Dockerfile + prod compose + Caddy route | ⬜ Phase 5 | single route, no bus/wall split |
 

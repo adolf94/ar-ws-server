@@ -13,12 +13,14 @@ public sealed class RealtimeHub(
     IConnectionRegistry registry,
     IGroupRegistry groups,
     IGroupPartitioner partitioner,
+    IConnectionAborts aborts,
     ILogger<RealtimeHub> logger) : Hub
 {
     public override async Task OnConnectedAsync()
     {
         var idKey = Context.UserIdentifier ?? "(unknown)";
         registry.Add(idKey, Context.ConnectionId);
+        aborts.Track(Context.ConnectionId, Context);   // disconnect-by-id support (§5.3)
 
         var principal = Context.User;
         var sub = principal?.GetSubject();
@@ -52,6 +54,7 @@ public sealed class RealtimeHub(
     public override Task OnDisconnectedAsync(Exception? exception)
     {
         if (Context.UserIdentifier is { } user) registry.Remove(user, Context.ConnectionId);
+        aborts.Untrack(Context.ConnectionId);
         logger.LogInformation("disconnected: user={User} connection={ConnectionId} error={Error}",
             Context.UserIdentifier, Context.ConnectionId, exception?.Message);
         return Task.CompletedTask;

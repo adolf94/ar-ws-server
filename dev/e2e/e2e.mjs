@@ -370,8 +370,56 @@ if (MODE === 'mock') {
     `other partition groups=${JSON.stringify(foreignListBody.groups?.map?.((g) => g.group))}`);
 }
 
-await connection.stop();
+// ── presence + disconnect (Phase 2 tail) ────────────────────────────────────
+const presRes = await fetch(`${SRV}/api/groups/demo/presence`, { headers: { Authorization: `Bearer ${idpToken}` } });
+const presBody = await presRes.json().catch(() => ({}));
+const ownRow = presBody?.presence?.find?.((p) => p.user_id === memberSub);
+check('P-1. presence: our identity online (stamps + closed world)',
+  presRes.status === 200 && presBody.group_partition === (listBody?.partition ?? null)
+    && ownRow && ownRow.online === true && ownRow.connections >= 1
+    && ownRow.client_id === userClaims.client_id,
+  `status=${presRes.status} row=${JSON.stringify(ownRow)}`);
 
+if (MODE === 'mock') {
+  // foreign disconnect refused: our token cannot close another client's socket
+  const foreignDiscToken = await mintMock({ sub: '99', scope: PUBLISHER_SCOPE, client_id: 'other-service' });
+  const foreignDiscConn = new HubConnectionBuilder()
+    .withUrl(`${SRV}/realtime/hub`, { accessTokenFactory: () => foreignDiscToken })
+    .build();
+  await foreignDiscConn.start();
+  const foreignDiscRes = await fetch(`${SRV}/api/connections/${encodeURIComponent(foreignDiscConn.connectionId)}/disconnect`, {
+    method: 'POST', headers: authHdrs,   // our spa-demo-client token
+  });
+  check('D-1. disconnect of another client_id\'s connection → 403',
+    foreignDiscRes.status === 403, `status=${foreignDiscRes.status}`);
+  await foreignDiscConn.stop();
+}
+
+// own disconnect: allowed, evicts the socket immediately
+const discRes = await fetch(`${SRV}/api/connections/${encodeURIComponent(connection.connectionId)}/disconnect`, {
+  method: 'POST', headers: authHdrs,
+});
+const discBody = await discRes.json().catch(() => ({}));
+check('D-2. disconnect own connection → 200 ok', discRes.status === 200 && discBody.ok === true,
+  `status=${discRes.status}`);
+
+await sleep(800);
+check('D-3. connection actually closed', connection.state === 'Disconnected',
+  `state=${connection.state}`);
+
+const presAfter = await fetch(`${SRV}/api/groups/demo/presence`, { headers: { Authorization: `Bearer ${idpToken}` } });
+const presAfterBody = await presAfter.json().catch(() => ({}));
+const ownRowAfter = presAfterBody?.presence?.find?.((p) => p.user_id === memberSub);
+check('D-4. presence after disconnect: identity persists, online=false',
+  ownRowAfter && ownRowAfter.online === false && ownRowAfter.connections === 0,
+  `row=${JSON.stringify(ownRowAfter)}`);
+
+const discGhost = await fetch(`${SRV}/api/connections/${encodeURIComponent('no-such-conn')}/disconnect`, {
+  method: 'POST', headers: authHdrs,
+});
+check('D-5. disconnect of unknown connection → 404', discGhost.status === 404, `status=${discGhost.status}`);
+
+await connection.stop().catch?.(() => {});
 // ── 6. server gates (no IdP round-trips required) ───────────────────────────
 const anon = await fetch(`${SRV}/api/publish`, {
   method: 'POST', headers: { 'Content-Type': 'application/json' },

@@ -145,7 +145,8 @@ scope-bearing M2M token works.
 | 5 | Remove user from group | `DELETE /api/groups/{g}/members?user_id=…` | ✅ today |
 | 6 | Send to one user (all connections, any service) | `POST /api/users/{sub}/send { data }` | ✅ today |
 | 7 | Send to one connection | `POST /api/connections/{id}/send { data }` | ✅ today — **partition-scoped**: only sockets whose identity lives inside the caller's own `client_id`; unknown → 404, foreign → 403 |
-| 8 | Disconnect a connection | `POST /api/connections/{id}/disconnect` | ⬜ Phase 2 |
+| 8 | Disconnect a connection | `POST /api/connections/{id}/disconnect` | ✅ today — partition-scoped like send-to-connection (404 unknown / 403 foreign) |
+| 9 | Presence for a group | `GET /api/groups/{g}/presence` | ✅ today — one row per persisted member identity: user_id + client_id + online + live-socket count |
 
 Row 6 is deliberately NOT partition-scoped: it addresses `user_channel|{sub}`
 — the channel every connection joins at connect — so `sub` is the only
