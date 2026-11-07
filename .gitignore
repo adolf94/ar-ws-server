@@ -17,3 +17,4 @@ __pycache__/
 clients/python/.venv/
 uv.lock
 dev/edge/.logs/
+clients/python/dist/

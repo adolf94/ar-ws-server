@@ -27,7 +27,7 @@ from .models import (
     PublishResult,
     SendResult,
 )
-from .tokens import AccessTokenProvider
+from .tokens import AccessTokenProvider, CallableTokenProvider
 
 DEFAULT_USER_AGENT = f"ar-realtime-client/0.1.0"
 
@@ -42,10 +42,25 @@ class RealtimePublisherOptions:
         user_agent_suffix: Optional[str] = None,
     ) -> None:
         self.base_url = base_url.rstrip("/")
-        self.token_provider = token_provider
         self.user_agent_suffix = user_agent_suffix
-        if not hasattr(self.token_provider, "get"):
-            self.token_provider = CallableTokenProvider(self.token_provider)  # type: ignore[assignment]
+        # accept a .get()-style provider, a 0-arg callable factory,
+        # or an AccessTokenProvider — nothing else (a raw dict/str would
+        # otherwise surface as a garbage bearer at call time)
+        provider = token_provider
+        if isinstance(provider, (str, bytes, dict)):
+            raise RealtimeValidationError(
+                "token_provider must expose .get() or be a 0-arg callable "
+                f"— got a raw {type(provider).__name__}"
+            )
+        if hasattr(provider, "get"):
+            self.token_provider = provider
+        elif callable(provider):
+            self.token_provider = CallableTokenProvider(provider)
+        else:
+            raise RealtimeValidationError(
+                "token_provider must expose .get() or be a 0-arg callable "
+                f"— got {type(provider).__name__}"
+            )
 
 
 class RealtimePublisher:

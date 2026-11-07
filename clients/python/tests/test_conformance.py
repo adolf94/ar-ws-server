@@ -169,3 +169,29 @@ def test_ua1_user_agent_is_ours():
     server.server_close()
     assert "ar-realtime-client" in observed["user_agent"]
     assert observed["authorization"] == "Bearer echo-bearer"
+
+
+def test_options_accept_plain_callable_factory():
+    """v0.1.0 wheel bug: a plain callable token provider NameErrored inside
+    RealtimePublisherOptions (CallableTokenProvider not imported there)."""
+    counter = {"n": 0}
+
+    def factory() -> str:
+        counter["n"] += 1
+        return f"tok-{counter['n']}"
+
+    options = RealtimePublisherOptions(base_url="http://x", token_provider=factory)
+    provider = options.token_provider
+    assert provider.get() == "tok-1" and provider.get() == "tok-2"  # fresh per call
+    # plus a .get()-style object and a real AccessTokenProvider keep working
+    class Obj:
+        def get(self) -> str: return "obj-tok"
+    assert RealtimePublisherOptions("http://x", Obj()).token_provider.get() == "obj-tok"
+    assert RealtimePublisherOptions("http://x", StaticTokenProvider("s")).token_provider.get() == "s"
+
+
+def test_options_reject_garbage_providers():
+    with pytest.raises(RealtimeValidationError):
+        RealtimePublisherOptions(base_url="http://x", token_provider="raw-string")
+    with pytest.raises(RealtimeValidationError):
+        RealtimePublisherOptions(base_url="http://x", token_provider={"a": 1})  # dict has .get
