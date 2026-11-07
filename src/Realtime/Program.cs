@@ -14,6 +14,7 @@ using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Primitives;
 using Microsoft.IdentityModel.Tokens;
+using Microsoft.OpenApi;
 using Prometheus;                 // plan §3 ops: /metrics
 using Realtime.Api;
 using Realtime.Auth;
@@ -129,7 +130,21 @@ builder.Services.AddCors(options => options.AddPolicy("origin-fence", policy => 
     .SetPreflightMaxAge(TimeSpan.FromMinutes(10))));
 
 // ── API surface (plan §5.3) ─────────────────────────────────────────────────
-builder.Services.AddOpenApi();                    // machine contract: /openapi/v1.json
+// OPENAPI_BASE_URL pins the PUBLIC base of the machine contract. The edge
+// serves the canonical paths under a subdirectory (Caddy handle_path strips
+// the prefix, so upstream never sees it) — worse, the generator derives the
+// server from the forwarded request and advertises http:// apis.adolfrey.com
+// with no prefix. Consumers read servers[] from /openapi/v1.json, so prod
+// must publish its real public base. Empty → keep the request-derived value
+// (local dev / rehearsal: no edge prefix).
+var openapiBaseUrl = Conf("OPENAPI_BASE_URL");
+builder.Services.AddOpenApi(options => options.AddDocumentTransformer(
+    (doc, ctx, ct) =>
+    {
+        if (openapiBaseUrl.Length > 0)
+            doc.Servers = [new OpenApiServer { Url = openapiBaseUrl }];
+        return Task.CompletedTask;
+    }));                                    // machine contract: /openapi/v1.json
 
 // §9: fixed-window, partitioned by the verified bearer's client_id
 // (anonymous requests → the "anon" partition). The claims must be resolvable

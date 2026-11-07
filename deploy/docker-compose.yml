@@ -35,6 +35,9 @@ services:
       ASPNETCORE_URLS: http://0.0.0.0:5000
       # ── IdP (the REAL authority) ──────────────────────────────────────────
       AUTH_AUTHORITY: ${AUTH_AUTHORITY:-https://auth.adolfrey.com/api/}
+      # public base of the machine contract (openapi/v1.json servers[]) — the
+      # edge prefix (deploy/caddy-route.caddy handle_path) is invisible upstream
+      OPENAPI_BASE_URL: ${OPENAPI_BASE_URL:-https://apis.adolfrey.com/websockets}
       AUTH_AUDIENCE: ''                 # empty = issuer-only trust
       PUBLISH_REQUIRED_SCOPE: api://ws-server/app:publisher
       # browser fences (WS-hijack + CORS preflight): wildcard = one label
