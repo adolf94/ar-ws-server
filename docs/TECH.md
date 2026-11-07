@@ -58,9 +58,12 @@ Two authentication schemes, by endpoint:
    This is the transport protocol's native `{ url, accessToken }` slot
    (`TransportProtocols.md`) — the same mechanism Azure SignalR uses — with
    no custom endpoint and no client-side special casing.
-4. The WS handshake is validated against the connection JWT only. Browser WS
-   API cannot set headers, so it arrives as `?access_token=` — scoped to the
-   hub path by design.
+4. The WS handshake is validated against the connection JWT only. In
+   browsers it arrives as `?access_token=` (browser WS API cannot set
+   headers); native/Node transports send it as the `Authorization: Bearer`
+   header on the handshake itself (verified in the installed
+   `@microsoft/signalr@10` source: `Platform.isNode` → header, browser →
+   query). Both lanes end in the same conn scheme, both gates enforced.
 5. On reconnect the client re-negotiates (fresh IdP token via its token
    factory) → fresh connection token. Never set `skipNegotiation: true`.
 
@@ -85,6 +88,11 @@ Single middleware, exact-path dispatch, wired after `UseAuthentication`:
 * **WS handshake** (`GET /realtime/hub` + upgrade):
   `AuthenticateAsync("realtime-conn")` → `401` otherwise; the principal is
   assigned to `context.User` before the hub accepts the connection.
+  Gate note: the match is on the explicit upgrade headers
+  (`Connection: Upgrade` + `Upgrade: websocket`) rather than only
+  `HttpContext.WebSockets.IsWebSocketRequest`, which reported false for a
+  perfectly valid node-client upgrade; the e2e's GATE-1c/1d checks prove
+  anonymous/garbage upgrades are rejected (anti-false-pass for WS-2).
 * Everything else (server API, health) passes through untouched — those
   endpoints carry their own `[Authorize]`.
 
@@ -153,9 +161,12 @@ via `node dev/e2e/mint-token.mjs`) → fresh mint (authority round-trip only as
 a fallback). No secret or full token is ever printed — decoded claims only.
 
 Checks today: negotiate injects `accessToken` (shape a) · handshake consumes
-it · publish → 200 · publication received with `from`/`sent_at` · unauthenticated
-publish → 401 · tokenless negotiate → 401 · (mock mode only) scopeless publish
-→ 403. Latest full real-IdP run: 9/9 PASS.
+it (proven real by the WS-gate negatives) · publish → 200 · publication
+received with `from`/`sent_at` · unauthenticated publish → 401 · tokenless
+negotiate → 401 · WS upgrade without/garbage connection token → rejected ·
+(mock mode only) scopeless publish → 403. Latest full real-IdP run: 9/9 PASS;
+latest server/WS-only run: 8/8 PASS with hub identity verified
+(`connected: user=speedtest`).
 
 ## 7 · Public surface (implemented vs planned)
 

@@ -53,6 +53,10 @@
   `POST/DELETE /api/groups/{g}/members` by user id), per-service group
   scoping `client_id` (plan R4)
 - [ ] Phase 2: broadcast, presence, info endpoints; full contract + OpenAPI
+  — **fold in the plan §5.3 gap surfaced writing `docs/INTEGRATION.md`**:
+  add send-to-user (`/api/users/{sub}/send`) and
+  send-to-connection (`/api/connections/{id}/send`) to §5.3 (fan-out
+  primitives already exist server-side; no HTTP route is planned)
 - [ ] Phase 3: history ring buffer, metrics, rate limiting, Dockerfile
 - [ ] Phase 4: SPA migration (`centrifuge-js` → `@microsoft/signalr`),
   INTEGRATION.md rewrite (nucleus written: `docs/INTEGRATION.md`, phase-0
@@ -104,5 +108,20 @@ round-trip), confirm green, then `git add -A && git commit -m "phase-0 spike: ne
   the cache unusable by `e2e.mjs` (`Bearer undefined` on the next run);
   token cache added to `.gitignore` before staging.
 - Phase 0 is **done**; next session starts Phase 1 (§Next up) per plan §8.
+
+**Follow-up 2 — 2026-11-07 (WS-gate hardening):**
+- **Security bug found + fixed** in the WS fence: `HttpContext.WebSockets.
+  IsWebSocketRequest` reported *false* for a perfectly valid node-client
+  upgrade (`Connection: Upgrade` / `Upgrade: websocket` present) → the gate
+  was skipped and the un-`[Authorize]`d hub accepted an anonymous connection;
+  the e2e's predecessor WS-2 check **false-passed** around it.
+- Gate now matches the explicit upgrade headers. Client facts confirmed from
+  installed `@microsoft/signalr@10` source: negotiate `accessToken` is
+  consumed; Node transports send it as the handshake `Authorization` header,
+  browsers as `?access_token=` — doc'd in TECH.md §2/§3.
+- New e2e negatives **GATE-1c/1d** (WS upgrade w/o token / garbage token →
+  rejected) make WS-2 a real assertion. server/WS suite: **8/8 PASS**;
+  hub identity verified: `connected: user=speedtest`.
+- Diagnostic logs reduced (dispatch → Debug; claim dump → Debug).
 - Next action: `fuser -k 5000/tcp 9001/tcp; bash dev/run-spike.sh` → then
   start Phase 1 group membership work.

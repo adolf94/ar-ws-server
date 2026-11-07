@@ -15,7 +15,8 @@ plan §5.2 (trust model) · §5.3 (target API contract).
 ```
 browser / mobile (read-only) ──► POST /realtime/hub/negotiate  (IdP Bearer header)
                                   ◄ { connectionId, accessToken, … }
-                              ──► GET  /realtime/hub (WS upgrade; connection token via ?access_token or header)
+                              ──► GET  /realtime/hub (WS upgrade; conn token
+                                                   via ?access_token or header)
                                   ◄ SignalR "event" messages — clients never publish
 
 app backend (publisher) ─────► POST /api/publish (IdP Bearer + publisher scope)
@@ -36,6 +37,10 @@ app backend (publisher) ─────► POST /api/publish (IdP Bearer + publi
   ∙ supply the IdP token via `accessTokenFactory` (JS) / `AccessTokenProvider`
   (.NET) so it's re-evaluated per connect,
   ∙ **never set `skipNegotiation: true`** — negotiate is the auth entry door.
+* The connection JWT is checked at handshake time only; a connection stays
+  **alive past its 5-min token TTL** — expiry is a *reconnect* concern, not a
+  mid-session kill. Rotating `CONN_TOKEN_SECRET` (ops) does force everyone
+  through a fresh negotiate.
 * Identity for fan-out purposes = the verified IdP `sub` claim. Your token's
   `client_id` determines per-service scoping (⬜ Phase 1 — publish targets
   bare group names today).
@@ -44,6 +49,8 @@ app backend (publisher) ─────► POST /api/publish (IdP Bearer + publi
 
 Dependencies: `@microsoft/signalr` (^10). Verified by the e2e
 (`dev/e2e/e2e.mjs`, 6/6 PASS — shape (a) is the settled negotiate contract).
+
+### 3.1 · The code (SDK path — what you should ship)
 
 ```js
 import { HubConnectionBuilder, LogLevel } from '@microsoft/signalr';
@@ -54,6 +61,7 @@ const connection = new HubConnectionBuilder()
   .withUrl('https://realtime.example/realtime/hub', {
     accessTokenFactory: () => idpToken,       // re-invoked per (re)connect
   })
+  .withAutomaticReconnect()
   .configureLogging(LogLevel.Warning)
   .build();
 
@@ -70,46 +78,129 @@ connection.on('event', (data) => {
 await connection.start();
 ```
 
-Notes:
+The SDK performs the entire sequence in §3.2 for you. What you must provide:
+the factory returning the *IdP* token, and `on('event', …)` handlers.
 
-* **No handler needed for obtaining a token** — the client fetches the
-  negotiate response and switches to the injected `accessToken` on its own.
-  Your `accessTokenFactory` returning the *IdP* token is the only moving part.
-* Groups today: every connection auto-joins group `demo` (phase-0
-  convenience). Real membership arrives in Phase 1; the target pattern is
-  your app backend calling `POST /api/groups/{g}/members` right after the
-  client connects (⬜ — see plan §5.3).
-* Reconnect: use `withAutomaticReconnect()`; every successful reconnect went
-  through a fresh negotiate automatically, so no special handling needed.
+### 3.2 · The wire — negotiate, then hub (for debugging / non-SDK ports)
+
+**Step 1 — negotiate** (this is how the client uses negotiate):
+
+```http
+POST /realtime/hub/negotiate?negotiateVersion=1 HTTP/1.1
+Authorization: Bearer <IdP access token>
+Content-Type: application/x-www-form-urlencoded
+
+(SignalR's standard negotiate form body — the auth that matters is the header)
+```
+
+Response `200` (shape (a) — verified):
+
+```json
+{
+  "connectionId": "zf8FcCYCEjd_Tj1iS2KyEQA==",
+  "connectionToken": "…",        // opaque; used by the URL below
+  "negotiateVersion": 1,
+  "accessToken": "<conn JWT>",   // ← injected by OUR fence (§2), not by SignalR
+  "availableTransports": [ { "transport": "WebSockets", … } ]  // WS-only fork
+}
+```
+
+Tokenless/malformed → `401 {"error":"invalid_token"}`. The `accessToken`
+differs from the IdP token and carries `{ sub, client_id, scope, iat, jti }`.
+
+**Step 2 — connect via the hub**: the client opens a WebSocket to
+`/realtime/hub?id=<connection-token>`, the SDK appends `?access_token=`
+(the connection JWT — browser WS cannot set headers; the fence accepts it
+on the hub path only, or as an `Authorization: Bearer` header for native
+transports). The fence validates it against the in-process HS256 key, then
+the SDK sends the SignalR handshake frame (`{"protocol":"json","version":1}`)
+and the connection is live as that user (`sub`). After that it's a normal
+SignalR connection: the server invokes `"event"`; clients invoke **nothing**.
+
+**Reconnects** (`withAutomaticReconnect`): do nothing special — every attempt
+re-negotiates first (factory re-invoked → fresh IdP token → fresh conn JWT).
+Never cache a connection JWT across reconnects.
+
+### 3.3 · Groups today
+
+Every connection auto-joins group `demo` (phase-0 convenience; a bare
+publish→receive path). Real membership lands in Phase 1 — the target
+pattern is your *app backend* calling group-add right after the client
+connects (§4.2) — no subscription budget, no shaping channel.
 
 ## 4 · App backend (publisher)
 
-One endpoint live today:
+Auth for every write: `Authorization: Bearer <IdP token>` whose token carries
+the publisher scope — default `api://ws-server/app:publisher` (`PUBLISH_REQUIRED_SCOPE`).
+Your backend holds **zero realtime secrets**; any scope-bearing M2M token works.
 
-```http
-POST /api/publish
-Authorization: Bearer <IdP access token, carrying the publisher scope>
-Content-Type: application/json
+### 4.1 · Send-target matrix (what exists, what's coming)
 
-{ "group": "demo", "data": { "type": "chat_receive", "text": "hello" } }
-```
+| # | Send target | Endpoint | Status |
+|---|---|---|---|
+| 1 | To one group | `POST /api/publish { group, data }` | ✅ today (e2e-verified) |
+| 2 | To several groups | `POST /api/broadcast { groups[], data }` | ⬜ Phase 2 |
+| 3 | Put user into a group | `POST /api/groups/{g}/members { user_id }` | ⬜ Phase 1 |
+| 4 | Remove user from group | `DELETE /api/groups/{g}/members?user_id=…` | ⬜ Phase 1 |
+| 5 | Send to one user (all their connections) | `POST /api/users/{sub}/send { data }` | ⬜ **not yet in plan §5.3** — needs adding (see note) |
+| 6 | Send to one connection | `POST /api/connections/{id}/send { data }` | ⬜ **not yet in plan §5.3** — needs adding (see note) |
+| 7 | Disconnect a connection | `POST /api/connections/{id}/disconnect` | ⬜ Phase 2 (in plan §5.3) |
 
-* Required scope (default): `api://ws-server/app:publisher` — a normal IdP
-  bearer from your M2M client with that scope grant. Your backend holds **zero
-  realtime secrets**; any scope-bearing IdP token works.
-* The event's own identity: set `data.type`. The server stamps `from`
-  (your token's `client_id`) and `sent_at` (RFC 3339 UTC) on top — keep your
-  own fields inside `data`, and do not send `from`/`sent_at` yourself (they are
-  overwritten).
-* Responses: `200 {ok:true, group}` · `400 {error:"group_required"|"data_required"|"data_invalid", detail}`
-  · `401 {error:"invalid_token"}` (no/bad bearer) · `403` (bearer valid, wrong
-  scope). Publishers read these like normal HTTP — no `202`-with-error
-  semantics like the old wall.
-* `POST /api/broadcast`, group membership endpoints, presence, history, and
-  rate limits (429) are the Phase 1–3 plan items — don't build against them
-  yet; they will appear with tests in `dev/e2e`.
+Live semantics once received (fan-out primitives, server-side):
 
-### CORS / origins
+* **group** → every connection currently in that group, *including other
+  devices of the same user* (group fan-out has no per-user exclusion — that's
+  by design).
+* **user** (`Clients.User(sub)`, plan R5) → *all* live connections of that
+  user — the replacement for the old `user:` reserved channel: one send
+  reaches every device, tab, and reconnect instance.
+* **connection** (`Clients.Client(id)`) → exactly one socket.
+
+Delivery is **once per connected receiver, at send time** — there is no
+store-and-forward: a receiver offline mid-send misses that event (the
+history buffer, ⬜ Phase 3, is the late-join/late-receive fix, opt-in per
+group).
+
+> **Contract gap (owner decision pending):** plan §5.3 only routes
+> publish/broadcast/members/presence/history/disconnect. Targets #5/#6
+> (send-to-user, send-to-connection) are wired server-side
+> (`Clients.User` / `Clients.Client`) but have **no planned HTTP endpoint**.
+> If you need them from an app backend, ask for `/api/users/{sub}/send` and
+> `/api/connections/{id}/send` to be added to §5.3 before Phase 2 work
+> starts — otherwise unicast stays hub-internal.
+
+### 4.2 · Groups — how a client ends up in one (and how you put it there)
+
+Two mechanics (the second is the target model):
+
+1. **today (phase 0):** every connection auto-joins `demo`.
+2. **⬜ Phase 1 (target):** your backend calls `POST /api/groups/{g}/members`
+   with the client's `sub` (from the token it issued for them, or echoed from
+   the connect record) right after the client connects; remove on demand via
+   #4. Membership is keyed by user id, so the add applies to *all* of that
+   user's current sockets — and after each reconnect the backend simply
+   re-applies the group-adds (connect-time membership is the model; there is
+   no group memory in the server to rely on).
+
+Do **not** build against `demo`. Group names are free-form strings today;
+per-service scoping by `client_id` (plan R4) lands alongside Phase 1.
+
+### 4.3 · Envelope rules
+
+* Put the event's identity in `data.type`. The server stamps `from`
+  (your token's `client_id` — do not send your own) and `sent_at`
+  (RFC 3339 UTC; overwritten regardless of what you send).
+* Responses: `200 {ok:true, group}` ·
+  `400 {error:"group_required"|"data_required"|"data_invalid", detail}` ·
+  `401 {error:"invalid_token"}` · `403` (valid bearer, wrong scope).
+  Real status codes — no `202`-with-error semantics like the old wall.
+* **Unknown group today = `200 ok` delivered to zero subscribers** — SignalR
+  keeps no persistent group registry, so a publish to an unknown/empty group
+  silently reaches nobody. The plan §5.3 "404 if group unknown" arrives with
+  the group service (Phase 1); until then, a typo'd group name fails
+  silently — coordinate group names in the event registry instead of probing.
+
+### 4.4 · CORS / origins
 
 Your SPA's origin must be in the server's `ALLOWED_ORIGINS` (comma list; one
 `*` = one subdomain label, e.g. `https://*.adolfrey.com`). Forbidden origins
@@ -121,8 +212,8 @@ long-polling profiles no longer exist, so your proxy must pass WS upgrades.
 Native transports can set headers, so the same flow works without any URL
 token: call negotiate yourself, or — since `?access_token=` is also honored
 on the hub path — `HttpConnection`'s `AccessTokenProvider` and let the
-library negotiate; the fence extracts the connection JWT from the header too
-(`docs/TECH.md` §2). Never cache a connection JWT across reconnects.
+library negotiate; the fence accepts the connection JWT from the header too
+(`docs/TECH.md` §2).
 
 ## 6 · Things to avoid
 
@@ -137,6 +228,8 @@ library negotiate; the fence extracts the connection JWT from the header too
 5. No `access_token` minting endpoint exists — the old
    `POST /realtime/token` is gone (decided in plan §5.2). If you need a
    server-side token, that's an IdP contract, not this service's job.
+6. Clients never publish — there is no hub method to invoke, no client→server
+   frames, ever. Every write goes through `/api/*` with a scope check.
 
 ## 7 · Operate quickly (self-host check)
 

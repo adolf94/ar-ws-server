@@ -33,11 +33,14 @@ public sealed class SecurityFenceMiddleware(RequestDelegate next, IConnectionTok
         // TEMP spike diagnostics: every /realtime/hub request logged at dispatch
         if (context.Request.Path.StartsWithSegments("/realtime/hub"))
         {
-            logger.LogInformation("fence dispatch: {Method} {Path} negotiatePath={IsNegotiatePath} isWs={IsWs}",
+            logger.LogDebug("fence dispatch: {Method} {Path} negotiatePath={IsNegotiatePath} isWs={IsWs} connection='{Connection}' upgrade='{Upgrade}' version='{Version}'",
                 context.Request.Method,
                 context.Request.Path,
                 context.Request.Path == $"{HubPath}/negotiate",
-                context.WebSockets.IsWebSocketRequest);
+                context.WebSockets.IsWebSocketRequest,
+                context.Request.Headers.Connection.ToString(),
+                context.Request.Headers.Upgrade.ToString(),
+                context.Request.Headers["Sec-WebSocket-Version"].ToString());
         }
 
         if (HttpMethods.IsPost(context.Request.Method) && context.Request.Path == $"{HubPath}/negotiate")
@@ -46,7 +49,13 @@ public sealed class SecurityFenceMiddleware(RequestDelegate next, IConnectionTok
             return;
         }
 
-        if (HttpMethods.IsGet(context.Request.Method) && context.Request.Path == HubPath && context.WebSockets.IsWebSocketRequest)
+        if (HttpMethods.IsGet(context.Request.Method) && context.Request.Path == HubPath
+            && (context.WebSockets.IsWebSocketRequest
+                // node/native SignalR transports upgrade identically, but
+                // HttpContext.WebSockets may report false for them — accept
+                // the explicit upgrade headers as the transport signal
+                || (context.Request.Headers.Connection.ToString().Contains("Upgrade", StringComparison.OrdinalIgnoreCase)
+                    && context.Request.Headers.Upgrade.ToString().Contains("websocket", StringComparison.OrdinalIgnoreCase))))
         {
             await HandleWebSocketHandshake(context);
             return;
@@ -125,7 +134,7 @@ public sealed class SecurityFenceMiddleware(RequestDelegate next, IConnectionTok
         context.User = connAuth.Principal!;
         var principal = connAuth.Principal!;
         var claimDump = string.Join(" | ", principal.Claims.Select(c => $"{c.Type}={(c.Value.Length <= 24 ? c.Value : c.Value[..24] + "..")}"));
-        logger.LogInformation(
+        logger.LogDebug(
             "hub handshake: connection token verified; identity.Name={Name} nameId={NameId} rawSub={RawSub}; claims=[{Claims}]",
             principal.Identity?.Name,
             principal.FindFirstValue(ClaimTypes.NameIdentifier),

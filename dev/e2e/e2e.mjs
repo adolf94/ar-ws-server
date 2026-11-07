@@ -170,6 +170,28 @@ check('GATE-1a. unauthenticated publish → 401', anon.status === 401);
 const noAuthNegotiate = await fetch(`${SRV}/realtime/hub/negotiate?negotiateVersion=1`, { method: 'POST' });
 check('GATE-1b. negotiate with no token → 401', noAuthNegotiate.status === 401, `status=${noAuthNegotiate.status}`);
 
+// WS gate: an unauthenticated/garbage WS upgrade must be rejected by the
+// fence (this is what proves WS-2 isn't a false pass).
+async function wsUpgradeShouldFail(url) {
+  return new Promise((resolve) => {
+    let done = false;
+    const finish = (ok) => {
+      if (done) return;
+      done = true;
+      try { ws.close(); } catch { /* already closing */ }
+      resolve(ok);
+    };
+    const ws = new globalThis.WebSocket(url);
+    ws.onerror = () => finish(true);   // handshake refused → error
+    ws.onclose = () => finish(true);   // closed without opening → rejected
+    ws.onopen = () => finish(false);   // CONNECTED — the gate failed
+    setTimeout(() => finish(true), 3000); // timeout treated as rejection
+  });
+}
+check('GATE-1c. WS upgrade without connection token → rejected', await wsUpgradeShouldFail(`${SRV}/realtime/hub`));
+check('GATE-1d. WS upgrade with garbage connection token → rejected',
+  await wsUpgradeShouldFail(`${SRV}/realtime/hub?access_token=garbage-JWT`));
+
 if (freshlyMinted && MODE === 'mock') {
   const weakToken = await mintMock({ sub: 'rng-user', scope: 'realtime:connect', client_id: 'spa-demo-client' });
   const noScope = await fetch(`${SRV}/api/publish`, {
