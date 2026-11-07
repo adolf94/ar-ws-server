@@ -16,6 +16,10 @@ concurrency:
 env:
   REGISTRY: ghcr.io
   IMAGE_NAME: ${{ github.repository }}
+  # Published Ar.Auth.OpenId from adolf94/ar-oauth2 (GitHub Packages NuGet).
+  # Bumps here must also update the Dockerfile ARG fallback. Dev builds are
+  # unaffected — they keep the locally built 1.2.0-local pin in Realtime.csproj.
+  AR_AUTH_OPENID_VERSION: "1.2.1"
 
 jobs:
   build-and-deploy:
@@ -23,15 +27,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Dockerfile COPYs nuget-feed/ (gitignored, normally staged by
-      # dev/build-image.sh from the sibling ar-auth repo). Fail fast with a
-      # clear message until the Ar.Auth.OpenId feed is provided to CI.
-      - name: Verify vendored NuGet feed
+      # Dockerfile COPYs nuget-feed/ (gitignored). CI stages the published
+      # Ar.Auth.OpenId artifact from GitHub Packages here; local dev stages
+      # the locally built 1.2.0-local via dev/build-image.sh.
+      - name: Stage vendored NuGet feed (Ar.Auth.OpenId from GitHub Packages)
+        env:
+          TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          if [ ! -d nuget-feed ] || ! ls nuget-feed/Ar.Auth.OpenId.*.nupkg >/dev/null 2>&1; then
-            echo "::error::nuget-feed/ with Ar.Auth.OpenId nupkgs is missing (gitignored, not in checkout)"
+          set -euo pipefail
+          mkdir -p nuget-feed
+          target="nuget-feed/Ar.Auth.OpenId.${AR_AUTH_OPENID_VERSION}.nupkg"
+          if ! curl --fail-with-body --show-error --silent --location \
+               -u "adolf94:${TOKEN}" -H 'Accept: application/octet-stream' \
+               "https://nuget.pkg.github.com/adolf94/download/ar.auth.openid/${AR_AUTH_OPENID_VERSION}" \
+               -o "$target"; then
+            echo "::error::Could not fetch Ar.Auth.OpenId ${AR_AUTH_OPENID_VERSION} from nuget.pkg.github.com/adolf94."
+            echo "::error::GITHUB_TOKEN cannot read packages of another repo by default: open the Ar.Auth.OpenId package page (Settings) and grant adolf94/ar-ws-server read access, or store a classic PAT with read:packages as a secret and pass it in TOKEN."
             exit 1
           fi
+          ls -l nuget-feed/
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -59,6 +73,8 @@ jobs:
           cache-from: type=gha
           cache-to: type=gha,mode=max
           platforms: linux/amd64
+          build-args: |
+            AR_AUTH_OPENID_VERSION=${{ env.AR_AUTH_OPENID_VERSION }}
 
       - name: Trigger homelab deploy webhook (gh_webhooks)
         env:

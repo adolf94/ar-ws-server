@@ -13,13 +13,17 @@
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
     <RootNamespace>Realtime</RootNamespace>
+    <!-- Ar.Auth.OpenId pin: dev consumes the locally built 1.2.0-local (vendored into
+         nuget-feed/ by dev/build-image.sh); the CI container build overrides this at
+         restore time with the published GitHub Packages artifact (see Dockerfile). -->
+    <ArAuthOpenIdVersion>1.2.0-local</ArAuthOpenIdVersion>
   </PropertyGroup>
 
   <ItemGroup>
     <!-- hub-side connection-token scheme (HS256, ?access_token query-or-header) -->
     <PackageReference Include="Microsoft.AspNetCore.Authentication.JwtBearer" Version="10.0.0" />
     <!-- IdP token verification: docs/INTEGRATION.md's official IdP client -->
-    <PackageReference Include="Ar.Auth.OpenId" Version="1.2.0-local" />
+    <PackageReference Include="Ar.Auth.OpenId" Version="$(ArAuthOpenIdVersion)" />
     <PackageReference Include="Microsoft.AspNetCore.OpenApi" Version="10.0.0" />
     <PackageReference Include="prometheus-net.AspNetCore" Version="8.2.1" />
   </ItemGroup>
