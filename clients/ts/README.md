@@ -1,15 +1,14 @@
 # @adolf94/realtime-client
 
-Consumer client for the **realtime** microservice (`../`): SignalR hub
-subscription with envelope routing, automatic reconnect (always
-re-negotiating), and a Cloudflare-safe `User-Agent` on non-browser lanes.
+> **Purpose**: Official TypeScript/JavaScript consumer client for subscribing to the SignalR realtime event bus.  
+> **Audience**: Frontend web developers (React, Vue, SPA), mobile web engineers, and Node.js consumer service developers.  
+> **Usage**: Consult for browser and Node client setup, authentication handshake integration (`@adolf94/ar-auth-client`), typed event listener patterns, and Cloudflare bot-mitigation headers.
 
-Read-only by contract: browsers/clients never publish — the bus delivers
-server-side fanned-out `event` envelopes only (see the realtime repo's
-`docs/CONTRACT.md`). Publishing belongs to backend services via the server
-API — publisher clients live in `clients/dotnet` / `clients/python`.
+Consumer client for the **realtime** microservice. Provides SignalR hub subscriptions with event-type routing, automatic reconnection with fresh negotiation, and Cloudflare-safe `User-Agent` headers.
 
-## Quick start (browser SPA + @adolf94/ar-auth-client)
+Browser and consumer clients are read-only; publishing events is handled by backend services via the HTTP server API (`docs/CONTRACT.md`). For publisher implementations, see `clients/dotnet`.
+
+## Quick Start (Browser SPA with @adolf94/ar-auth-client)
 
 ```ts
 import { createRealtimeHub } from '@adolf94/realtime-client';
@@ -25,45 +24,44 @@ const hub = createRealtimeHub({
 hub.on('chat_receive', (envelope) => renderChat(envelope.from, envelope.text));
 hub.onAny((envelope) => telemetry.track('bus', envelope.type)); // optional
 
-await hub.start();   // negotiate (auth entry point) → conn JWT → WS
-await hub.stop();    // idempotent
+await hub.start();   // Negotiates auth -> receives connection JWT -> connects WS
+await hub.stop();    // Idempotent
 ```
 
-## Quick start (Node / tooling)
+## Quick Start (Node.js / Tooling)
 
 ```ts
-// callers own the IdP token minting (ar-auth-client or raw client_credentials)
+// Callers provide fresh IdP access tokens (via ar-auth-client or client_credentials)
 const hub = createRealtimeHub({
   url: 'http://local.realtime:5000/realtime/hub',
   tokenFactory: () => getFreshIdpToken(),
 });
 ```
 
-## Envelope shape
+## Event Envelope
 
 ```json
-{ "type": "chat_receive", …payload, "from": "<publisher client_id>", "sent_at": "RFC3339 UTC" }
+{
+  "type": "chat_receive",
+  "from": "<publisher client_id>",
+  "sent_at": "RFC3339 UTC",
+  …payload
+}
 ```
 
-`type` + `from` + `sent_at` are server-stamped. Unknown types must be
-ignored — route by a `switch`/Map, never `any`-cast the whole delivery.
+* `from` and `sent_at` are stamped server-side.
+* Handlers should route on `type` and ignore unrecognized message types for forward compatibility.
 
-## User-Agent (Cloudflare)
+## User-Agent & Cloudflare Handling
 
-The service sits behind Cloudflare; bot mitigation must not see
-`Microsoft SignalR/…` from a Node-process. This library sends
-`realtime-client-ts/x.y.z` (`X-SignalR-User-Agent` +, on Node lanes, the
-actual `User-Agent` header — both override SignalR's defaults on negotiate
-*and* the WS handshake). Override it with `userAgent` if you want your app's
-name; browsers keep the native UA and only send the `X-SignalR-User-Agent`
-override, which the server's CORS policy allows explicitly.
+To avoid triggering bot mitigations against default SignalR user agent strings, this client emits `realtime-client-ts/<version>`:
+* **Node.js**: Sets both `X-SignalR-User-Agent` and the `User-Agent` header during negotiate and WebSocket handshake.
+* **Browser**: Preserves native browser user agent headers and passes the `X-SignalR-User-Agent` header (permitted by server CORS).
+* Custom identifiers can be configured using the `userAgent` option.
 
-## Semantics
+## Connection Semantics
 
-* `tokenFactory` is re-invoked on every (re)connect — return a FRESH IdP
-  token; the server issues a ≤ 5-min connection JWTs at negotiate only.
-* Never `skipNegotiation: true` (it bypasses the auth entry point).
-* No store-and-forward: events are delivered to CONNECTED receivers only;
-  backend-managed group membership is re-applied at every reconnect, so
-  subscribe before `start()`.
-* Reconnect default: `[0, 3000, 6000, 12000, 24000]`.
+* **Token Negotiation**: `tokenFactory` runs on every initial connect and reconnection. Always return a fresh IdP token; connection JWTs expire within 5 minutes.
+* **Negotiation Gate**: Never set `skipNegotiation: true`, as negotiation performs required authentication.
+* **Delivery**: Delivery is once per active connected receiver at send time. Backend-managed group memberships are automatically re-applied upon reconnect.
+* **Reconnect Backoff**: Default retry intervals are `[0, 3000, 6000, 12000, 24000]` ms.

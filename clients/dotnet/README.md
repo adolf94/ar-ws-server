@@ -1,41 +1,42 @@
 # Ar.Realtime.Client
 
-Publisher client for the **realtime** microservice — the HTTP server API
-door (CONTRACT v1, `../../docs/CONTRACT.md`): publish/broadcast, unicast
-lanes (the reasoning-stream addresses), group + members ops, history,
-presence, force-disconnect.
+> **Purpose**: Official .NET publisher SDK for emitting events and managing groups through the Realtime Server HTTP API.  
+> **Audience**: .NET backend service developers building event-driven publishing and streaming features.  
+> **Usage**: Consult for publisher client setup, dependency injection, authentication providers, reasoning stream delta delivery, and rate-limit backoff handling.
 
-Consumer (hub subscription) code lives in `clients/ts` — per the owner's
-role split, .NET backends here are PUBLISHERS.
+Publisher client for the **realtime** microservice server API (`docs/CONTRACT.md`). Supports publish/broadcast, unicast lanes (including high-volume reasoning streams), group and member operations, history, presence, and connection termination.
 
-## Quick start
+For consumer (hub subscription) client code, see `clients/ts`.
+
+## Quick Start
 
 ```csharp
 var arAuth = new ArAuthClient(new ArAuthOptions
 {
     Authority = "https://auth.adolfrey.com/api",
-    ClientId = "your-m2m-client",      // must carry the publisher scope
+    ClientId = "your-m2m-client",      // Must carry the publisher scope
     ClientSecret = "…",
 });
 
 await using var realtime = new RealtimePublisher(new RealtimePublisherOptions
 {
-    BaseUrl = "https://realtime.example.com",   // no /api suffix
+    BaseUrl = "https://realtime.example.com",   // Without /api suffix
     AccessTokenProvider = new ArAuthAccessTokenProvider(arAuth, "api://ws-server/app:publisher"),
     UserAgentSuffix = "my-service",
 });
 
+// Group and membership management
 await realtime.CreateGroupAsync("approvals");
-await realtime.AddMemberAsync("approvals", userSub);              // live join + persists
+await realtime.AddMemberAsync("approvals", userSub); // Joins live sockets and persists
 
-// reasoning stream: proper lane, batch deltas per chunk (CONTRACT §2.1)
-//   unicast lanes' ceiling: RATE_SEND_PER_WINDOW (default 600/min)
+// Unicast AI reasoning / streaming send (batch deltas into token-group chunks)
 await realtime.SendToUserAsync(userSub, new JsonObject
 {
-    ["type"] = "ai_emission",   // REQUIRED — the wire identity (CONTRACT §3)
+    ["type"] = "ai_emission",   // Required event discriminator
     ["delta"] = chunkDelta,
 });
 
+// Publish event to group
 var result = await realtime.PublishAsync("approvals", new JsonObject
 {
     ["type"] = "chat_receive",
@@ -43,31 +44,25 @@ var result = await realtime.PublishAsync("approvals", new JsonObject
 });
 ```
 
-`data.type` is enforced client-side; `from`/`sent_at` are server-stamped —
-do NOT set them.
+> [!NOTE]
+> `data.type` is required and enforced client-side. `from` and `sent_at` are automatically stamped server-side; do not supply them in payloads.
 
-## Errors & rate limiting
+## Errors & Rate Limiting
 
-Every non-2xx maps to `RealtimeApiException` carrying the envelope's
-`error` code + `detail`. A 429 (`rate_limited`, CONTRACT §2.1) additionally
-populates `RetryAfterSeconds` — **pause input work and retry at that
-deadline**; a spinning retry re-draws from the same exhausted partition.
+* Non-2xx HTTP responses throw `RealtimeApiException` containing `error` and `detail`.
+* HTTP 429 (`rate_limited`) responses populate `RetryAfterSeconds`. Pause caller execution and wait until `RetryAfterSeconds` elapses before retrying; immediate retries continue to consume the exhausted partition quota.
+* Client-side validation errors (missing `data.type`, empty identifiers) throw `RealtimeValidationException` before network requests are dispatched.
 
-Validation problems (`data.type` missing, empty member id) throw
-`RealtimeValidationException` BEFORE any wire traffic.
+## User-Agent
 
-## User-Agent (Cloudflare)
+Requests identify as `realtime-client-dotnet/0.1.0 (<UserAgentSuffix>)`. Provide `UserAgentSuffix` in `RealtimePublisherOptions` to distinguish traffic in reverse proxy and Cloudflare logs.
 
-The service sits behind Cloudflare; every lane identifies itself as
-`realtime-client-dotnet/0.1.0 (suffix)` — override per-app via
-`UserAgentSuffix` for traceability in CF logs.
-
-## Build / test / pack
+## Build, Test & Pack
 
 ```bash
-dotnet test tests/Ar.Realtime.Client.Tests       # SRV env → live conformance
-dotnet pack src/Ar.Realtime.Client -c Release -o $LOCAL_NUGET   # 0.1.0-local
-```
+# Run test suite
+dotnet test tests/Ar.Realtime.Client.Tests
 
-`Ar.Auth.OpenId` resolves from the sibling repo's local NuGet feed
-(`../../NuGet.config` → `../local-nuget`).
+# Package NuGet release
+dotnet pack src/Ar.Realtime.Client -c Release -o $LOCAL_NUGET
+```

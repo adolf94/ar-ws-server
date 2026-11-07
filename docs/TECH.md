@@ -1,20 +1,16 @@
 # Realtime Server — Technical Documentation
 
-Basis for this design: `../centrifugo/docs/PLAN-OWN-SERVER.md` (the plan that
-replaced the Centrifugo + proxy-wall stack). That document defines the
-*why* — the reasons-ledger R1–R10 and the trust model. This document defines
-the *what/how* as it is actually implemented, for contributors working in
-this repository.
+> **Purpose**: In-depth architectural, operational, and implementation documentation for the Realtime Server codebase.  
+> **Audience**: Core service maintainers, platform engineers, and DevOps/SREs.  
+> **Usage**: Consult for server internals, security fence mechanics, component maps, environment configurations, local test execution, and container deployment.
 
-Owner decisions locked in the plan: Option A (ASP.NET Core + SignalR) ·
-negotiate-issued connection tokens (§5.2) · SPA + mobile clients later ·
-single-node homelab scale.
+Technical architecture and implementation guide for the Realtime Server.
 
 ---
 
-## 1 · What this is
+## 1 · Architecture Overview
 
-One container, one process, two doors:
+One process, one container, providing two distinct communication surfaces:
 
 ```
                      ┌──────────────── one .NET process (net10.0) ────────────────┐
@@ -25,238 +21,153 @@ One container, one process, two doors:
                      │      SignalR hub — publications out; clients never publish│
                      │                                                           │
  app backends ───────┼─ ► POST /api/*          [IdP bearer + publisher scope]    │
-                     │      server API — publish today; group ops in Phases 1–2  │
- IdP (Ar.Auth) ── JWKS ─► verification anchor for every bearer lane          │
+                     │      server API — publish, groups, membership, history     │
+ IdP (Ar.Auth) ── JWKS ─► verification anchor for every bearer lane              │
                      └───────────────────────────────────────────────────────────┘
 ```
 
-* **The bus** is a SignalR hub behind a security fence (`§3`). At connect the
-  hub places every connection into `user_channel|{sub}` (cross-service
-  unicast address; sends arrive in Phase 2) + its partition-scoped groups.
-* **The server API** is a minimal API calling `IHubContext<RealtimeHub>`
-  directly — no relay, no injected API key, real HTTP status codes.
-* **There is exactly one secret in the whole system**: the in-process
-  connection-token signing key. Nothing is shared across containers; app
-  backends hold zero realtime secrets.
+* **The bus**: A SignalR hub protected by an upfront security fence (§3). At connect time, the hub joins every connection to `user_channel|{sub}` (cross-service unicast address) and all persisted partition-scoped groups.
+* **The server API**: Minimal API invoking `IHubContext<RealtimeHub>` directly — zero external relays, returning standard HTTP status codes.
+* **Single secret**: The in-process symmetric key for signing connection tokens. App backends require no realtime server secrets.
 
-## 2 · The trust model (plan §5.2, implemented)
+## 2 · Trust Model
 
-Two authentication schemes, by endpoint:
+Two authentication schemes by endpoint:
 
-| Endpoint | Scheme (`AuthSchemes.cs`) | Trusts | Verified by |
+| Endpoint | Scheme (`AuthSchemes.cs`) | Identity Handled | Verification |
 |---|---|---|---|
-| `POST /realtime/hub/negotiate` | `ar-idp` | IdP access tokens (RS256) | `Ar.Auth.OpenId` → `IArAuthClient.VerifyTokenAsync` (discovery + JWKS + issuer (+audience when pinned)); header only |
-| `GET /realtime/hub` (WS upgrade) | `realtime-conn` | connection JWTs (HS256) | `Microsoft.AspNetCore.Authentication.JwtBearer` with the in-process symmetric key; token from `?access_token` on the hub path only, or header (native clients) |
-| `POST /api/*` | `ar-idp` + `publisher` policy | IdP bearer + scope | same `VerifyTokenAsync` + `PublisherScopeHandler` (space-delimited `scope` claim) |
+| `POST /realtime/hub/negotiate` | `ar-idp` | IdP access tokens (RS256) | `Ar.Auth.OpenId` (`IArAuthClient.VerifyTokenAsync` via discovery, JWKS, issuer check; header-only) |
+| `GET /realtime/hub` (WS upgrade) | `realtime-conn` | Connection JWTs (HS256) | `Microsoft.AspNetCore.Authentication.JwtBearer` with in-process symmetric key (query `?access_token` or header) |
+| `POST /api/*` | `ar-idp` + `publisher` policy | IdP bearer + publisher scope | `VerifyTokenAsync` + `PublisherScopeHandler` checking space-delimited `scope` |
 
-### Negotiate-issued connection tokens (the core mechanic)
+### Negotiate-Issued Connection Tokens
 
-1. Client presents its IdP access token in the `Authorization` header on
-   negotiate (a fetch — headers allowed; **the IdP token never touches a URL**).
-2. The fence authenticates it (scheme `ar-idp`), then runs SignalR's negotiate.
-3. The middleware injects `accessToken` into the negotiate JSON: a
-   **connection JWT** — `{ sub, client_id, scope, iat, jti }`, `iss=realtime`,
-   `aud=realtime`, TTL ≤ 5 min (`CONN_TOKEN_TTL`), signed HS256 in-process.
-   This is the transport protocol's native `{ url, accessToken }` slot
-   (`TransportProtocols.md`) — the same mechanism Azure SignalR uses — with
-   no custom endpoint and no client-side special casing.
-4. The WS handshake is validated against the connection JWT only. In
-   browsers it arrives as `?access_token=` (browser WS API cannot set
-   headers); native/Node transports send it as the `Authorization: Bearer`
-   header on the handshake itself (verified in the installed
-   `@microsoft/signalr@10` source: `Platform.isNode` → header, browser →
-   query). Both lanes end in the same conn scheme, both gates enforced.
-5. On reconnect the client re-negotiates (fresh IdP token via its token
-   factory) → fresh connection token. Never set `skipNegotiation: true`.
+1. The client sends its IdP access token in the `Authorization: Bearer` header on negotiate (`POST /realtime/hub/negotiate`). The IdP token never touches query strings or URLs.
+2. The fence verifies the token against the IdP (`ar-idp` scheme) and executes SignalR's internal negotiate logic.
+3. Middleware injects `accessToken` into the negotiate JSON payload: a **connection JWT** (`{ sub, client_id, scope, iat, jti }`, `iss=realtime`, `aud=realtime`, TTL ≤ 5 min via `CONN_TOKEN_TTL`), signed with the in-process HS256 secret.
+4. The WebSocket handshake verifies this connection JWT. Browsers send it via `?access_token=`; native or Node transports send it via `Authorization: Bearer`.
+5. On reconnect, the client re-negotiates with a fresh IdP token to receive a new connection token (`skipNegotiation` must remain false).
 
-### Identity inside the hub
+### Identity Scoping
 
-* Hub identity = `Context.UserIdentifier` = `partition(client_id)-scoped`
-  `sub` (via `SubUserIdProvider`): the fan-out address space is per-service —
-  the same user's tokens from two services are two disjoint identities, so
-  `Clients.User(sub)` fans out only to connections of *that service's* tokens
-  (plan R5 + R4 on the connection plane).
-* The bearer's verified `client_id` scopes EVERYTHING a caller names
-  (plan R4, owner spec 2026-11-07): `GroupPartitioner` namespaces group
-  names and user identities; `IGroupRegistry` stores groups + memberships
-  (closed world — a service manages its own users); the hub applies stored
-  membership at connect and joins `user_channel|{sub}`.
-* Hub-side policies read the embedded `scope`.
+* **Hub identity**: `Context.UserIdentifier` resolves to a `client_id`-scoped `sub` via `SubUserIdProvider`. This ensures each calling service's fan-out namespace is isolated.
+* **Partition scoping**: The caller's `client_id` partitions groups and user identities via `GroupPartitioner`. A service manages only its own users and groups.
+* **Global unicast**: Cross-service user messaging (`POST /api/users/{sub}/send`) addresses `user_channel|{sub}`, delivering to all active connections for that `sub` across all services.
 
-## 3 · The security fence (`Negotiate/SecurityFenceMiddleware.cs`)
+## 3 · Security Fence (`Negotiate/SecurityFenceMiddleware.cs`)
 
-Single middleware, exact-path dispatch, wired after `UseAuthentication`:
+A single middleware placed after `UseAuthentication`:
 
-* **negotiate** (`POST /realtime/hub/negotiate`):
-  1. `AuthenticateAsync("ar-idp")` → reject `401 {error:"invalid_token"}` otherwise
-  2. buffer SignalR's negotiate response body
-  3. on `200`, parse JSON and set `"accessToken" = connJwt` (Content-Length fixed)
-  4. non-200 responses relay unchanged
-* **WS handshake** (`GET /realtime/hub` + upgrade):
-  `AuthenticateAsync("realtime-conn")` → `401` otherwise; the principal is
-  assigned to `context.User` before the hub accepts the connection.
-  Gate note: the match is on the explicit upgrade headers
-  (`Connection: Upgrade` + `Upgrade: websocket`) rather than only
-  `HttpContext.WebSockets.IsWebSocketRequest`, which reported false for a
-  perfectly valid node-client upgrade; the e2e's GATE-1c/1d checks prove
-  anonymous/garbage upgrades are rejected (anti-false-pass for WS-2).
-* Everything else: **eager auth** on any request with an `Authorization`
-  header (best-effort `AuthenticateAsync("ar-idp"); on success the principal
-  is placed on `context.User`, failures fall through untouched) — this feeds
-  the §9 rate limiter, which needs the verified `client_id` BEFORE the
-  endpoint runs. Endpoints still carry their own `[Authorize]`, so auth
-  outcomes are unchanged; then the request passes through.
+* **Negotiate (`POST /realtime/hub/negotiate`)**:
+  1. Authenticates against `ar-idp`; non-authenticated calls return `401 {"error":"invalid_token"}`.
+  2. Buffers SignalR's negotiate response body.
+  3. On `200`, parses the JSON and sets `"accessToken" = connJwt`, adjusting `Content-Length`.
+* **WebSocket handshake (`GET /realtime/hub` with upgrade headers)**:
+  1. Matches explicit upgrade headers (`Connection: Upgrade` and `Upgrade: websocket`).
+  2. Authenticates against `realtime-conn`; rejects invalid tokens with `401`.
+  3. Assigns the principal to `context.User` before the hub accepts the connection.
+* **All other endpoints**:
+  1. Performs eager authentication on requests with an `Authorization` header to populate `context.User` before rate limiting and endpoint handlers execute.
 
-Shape (a) (normal negotiate response + accessToken) is **verified working**
-with `@microsoft/signalr` — the e2e WS-1/WS-2 checks prove the client
-consumed the injected token. The Azure-style `{url, accessToken}` redirect
-(shape b) is documented in the plan as the fallback if a future SDK ever
-misbehaves.
+## 4 · Component Map
 
-## 4 · Components (repository map)
-
-| Path | Role |
+| Path | Purpose |
 |---|---|
-| `src/Realtime/Program.cs` | Assembly of everything: config, schemes, CORS fence, hub + API endpoints. 12-factor env style. |
+| `src/Realtime/Program.cs` | Application entry point: configuration, auth schemes, CORS, SignalR hub, and API routes. |
 | `src/Realtime/Auth/AuthSchemes.cs` | Scheme-name constants (`ar-idp`, `realtime-conn`). |
-| `src/Realtime/Auth/ArAccessTokenHandler.cs` | IdP verification scheme (`VerifyTokenAsync`; header-only; `sub` required → no anonymous connections). Also `PublisherScopeRequirement/Handler`. |
-| `src/Realtime/Auth/ConnectionTokenService.cs` | Mints + defines the connection JWT (claims, TTL, HS256 in-process). |
-| `src/Realtime/Auth/PrincipalExtensions.cs` | `GetSubject()` / `GetClientId()` across mapped and raw claim names. |
-| `src/Realtime/Groups/GroupPartitions.cs` | `IGroupPartitioner` — plan R4: encodes `client_id | logical` physical keys for groups AND user identities; every publish, hub join, and `SubUserIdProvider` id goes through it. |
-| `src/Realtime/Auth/SubUserIdProvider.cs` | `sub` → partitioned `Context.UserIdentifier` (`client_id`-scoped user namespace). |
-| `src/Realtime/Connections/ConnectionRegistry.cs` | `IConnectionRegistry` + in-memory impl: `user → connectionIds`. Bridge for user-targeted group ops (used from Phase 2 on). |
-| `src/Realtime/Connections/GroupRegistry.cs` | `IGroupRegistry` — plan §5.4 component 2: partition-scoped group records + membership bookkeeping (member keys = the physical `client_id|sub` identities); drives hub connect-time joins. |
-| `src/Realtime/Hubs/RealtimeHub.cs` | WS lifecycle: connect/disconnect registry registration; applies stored group membership + `user_channel|{sub}` at connect (no auto-join); `event` is the only fan-out method. |
-| `src/Realtime/Negotiate/SecurityFenceMiddleware.cs` | The fence (§3 above). |
-| `src/Realtime/Api/RealtimeApiEndpoints.cs` | Server API: `POST /api/publish` — Bearer + publisher scope, `data`-only convention, `from`/`sent_at` stamping. |
-| `src/Realtime/Connections/ConnectionAborts.cs` | Tracks live `HubCallerContext`s so the server API can force-close a socket (`POST /api/connections/{id}/disconnect`). |
-| `dev/mock-idp/server.js` | Offline mock IdP (copied from the wall repo, dependency-free; adds an OIDC discovery doc for Ar.Auth). Fallback only. |
-| `dev/e2e/e2e.mjs` | See §6. |
-| `dev/e2e/mint-token.mjs` | Refreshes the e2e token cache without running tests. |
-| `dev/run-spike.sh` | Boots (mock|real) stack and runs the e2e. |
-| `dev/build-image.sh` | Stages the vendored `nuget-feed/` nupkg + `docker build`. |
-| `Dockerfile` + `docker-compose.yml` | Phase-3 containerized shape (§9): sdk-10.0 multi-stage publish, `nuget-feed/` override, healthcheck via `curl /healthz`. |
+| `src/Realtime/Auth/ArAccessTokenHandler.cs` | IdP token validation and publisher scope authorization handler. |
+| `src/Realtime/Auth/ConnectionTokenService.cs` | Mints and signs connection JWTs (HS256, TTL, claims). |
+| `src/Realtime/Auth/PrincipalExtensions.cs` | Helper extensions to extract `sub` and `client_id` claims. |
+| `src/Realtime/Auth/SubUserIdProvider.cs` | Maps connection principal to partitioned `Context.UserIdentifier`. |
+| `src/Realtime/Groups/GroupPartitions.cs` | Encodes and decodes physical `client_id|logical` keys for groups and users. |
+| `src/Realtime/Connections/ConnectionRegistry.cs` | In-memory registry tracking active connection IDs per user identity. |
+| `src/Realtime/Connections/GroupRegistry.cs` | In-memory registry tracking group metadata, history buffers, and memberships. |
+| `src/Realtime/Connections/ConnectionAborts.cs` | Tracks live `HubCallerContext` instances to support server-initiated disconnects. |
+| `src/Realtime/Hubs/RealtimeHub.cs` | SignalR hub: manages connect/disconnect lifecycle and re-applies group memberships. |
+| `src/Realtime/Negotiate/SecurityFenceMiddleware.cs` | Negotiate token injection and WebSocket handshake validation. |
+| `src/Realtime/Api/RealtimeApiEndpoints.cs` | REST API routes for publish, broadcast, groups, members, presence, history, and disconnect. |
+| `dev/mock-idp/server.js` | Standalone mock IdP server for offline local development and test automation. |
+| `dev/e2e/e2e.mjs` | End-to-end integration and security test suite. |
+| `dev/run-spike.sh` | Orchestration script to run server and E2E tests against real or mock IdP. |
+| `Dockerfile` + `docker-compose.yml` | Multi-stage build and container deployment configuration. |
 
-Runtime packages: `Ar.Auth.OpenId` 1.2.0-local from the `ar-auth` sibling
-repo's local NuGet feed (`NuGet.config`; 1.2.0 fixes http-authority discovery
-for the mock IdP lane — `ArAuthClient` now sets
-`HttpDocumentRetriever.RequireHttps` based on the authority scheme),
-`Microsoft.AspNetCore.Authentication.JwtBearer` 10.0.0,
-`prometheus-net.AspNetCore` 8.2.1 (`/metrics`, HTTP + runtime collectors).
-SignalR itself ships in the shared framework.
+## 5 · Configuration
 
-## 5 · Configuration (environment)
-
-| Variable | Default (spike) | Meaning |
+| Variable | Default | Purpose |
 |---|---|---|
-| `AUTH_AUTHORITY` | `http://localhost:9001/realms/demo` (mock) / `https://auth.adolfrey.com/api/` (real) | OIDC authority Ar.Auth resolves (discovery + JWKS). Issuer-only trust by default. |
-| `AUTH_AUDIENCE` | *(empty)* | Empty = issuer-only trust (plan §5.2). Set to pin the `aud` check. |
-| `ALLOWED_ORIGINS` | `http://localhost:3000,https://*.adolfrey.com` | Origin fence — one `*` per origin = one subdomain label (same glob rule as the wall). |
-| `PUBLISH_REQUIRED_SCOPE` | `api://ws-server/app:publisher` | Scope required by the `publisher` policy on `/api/*`. |
-| `CONN_TOKEN_SECRET` | *(ephemeral random in dev, warned at boot)* | HMAC key for connection JWTs. ≥ 32 bytes. Prod: `openssl rand -hex 32`. The **only** secret. |
-| `CONN_TOKEN_TTL` | `300` | Connection JWT TTL seconds (≤ 5 min per plan). |
-| `RATE_WINDOW_SECONDS` | `60` | Fixed-window length for rate limiting (§9). |
-| `RATE_MAX_PER_WINDOW` | `60` | Default-lane ceiling per `client_id` partition per window (reads, publish/broadcast, group + members ops, disconnect). |
-| `RATE_SEND_PER_WINDOW` | `600` | Unicast-lane ceiling per `client_id` partition per window (`users/{sub}/send`, `connections/{id}/send`) — sized for high-volume reasoning/streaming sends. |
-| `ASPNETCORE_URLS` | — | e.g. `http://localhost:5000`. |
-| `ASPNETCORE_ENVIRONMENT` | — | `Development` enables detailed hub errors. |
+| `AUTH_AUTHORITY` | `http://localhost:9001/realms/demo` (mock) / `https://auth.adolfrey.com/api/` (prod) | OIDC authority for discovery and JWKS verification. |
+| `AUTH_AUDIENCE` | *(empty)* | Optional audience check. When empty, verification is issuer-only. |
+| `ALLOWED_ORIGINS` | `http://localhost:3000,https://*.adolfrey.com` | Allowed CORS origins for browser clients. Wildcard `*` matches one subdomain label. |
+| `PUBLISH_REQUIRED_SCOPE` | `api://ws-server/app:publisher` | Scope required on IdP tokens for write endpoints. |
+| `CONN_TOKEN_SECRET` | *(ephemeral random in dev)* | HMAC secret key (≥32 bytes) for signing connection JWTs. |
+| `CONN_TOKEN_TTL` | `300` | Connection JWT TTL in seconds (maximum 300 s / 5 min). |
+| `RATE_WINDOW_SECONDS` | `60` | Duration of the fixed rate limit window. |
+| `RATE_MAX_PER_WINDOW` | `60` | Max requests per window for the default API lane. |
+| `RATE_SEND_PER_WINDOW` | `600` | Max requests per window for high-volume unicast send lanes. |
+| `ASPNETCORE_URLS` | `http://localhost:5000` | Server listening URLs. |
+| `ASPNETCORE_ENVIRONMENT` | `Production` | Runtime environment mode. Set to `Development` for detailed hub errors. |
 
-`GET /healthz` echoes the effective auth configuration (no secrets).
+`GET /healthz` echoes effective auth settings without exposing secret keys.
 
-## 6 · Running and testing (current status: `TODO.md`)
+## 6 · Running and Testing
 
 ```bash
-# server (terminal 1)
+# Start server locally
 cd src/Realtime
 ASPNETCORE_URLS=http://localhost:5000 \
   AUTH_AUTHORITY=https://auth.adolfrey.com/api/ \
   CONN_TOKEN_SECRET=$(openssl rand -hex 32) \
   dotnet run
 
-# e2e (terminal 2) — real IdP; credentials sourced, never printed (run-spike.sh)
-bash dev/run-spike.sh           # IDP_MODE defaults to real
-IDP_MODE=mock bash dev/run-spike.sh   # offline lab lane
+# Run end-to-end tests against real IdP
+bash dev/run-spike.sh
+
+# Run end-to-end tests against offline mock IdP
+IDP_MODE=mock bash dev/run-spike.sh
 ```
 
-e2e focus (per owner request): **server/WS tests, not authority tests**.
-Token source priority: `IDP_TOKEN` env → `.idp-token-cache.json` ( refreshed
-via `node dev/e2e/mint-token.mjs`) → fresh mint (authority round-trip only as
-a fallback). No secret or full token is ever printed — decoded claims only.
+The test suite validates negotiate token injection, WebSocket handshake authentication, publish/broadcast routing, group and membership persistence, history ring buffers, cross-service unicast isolation, 401/403 negative gates, and rate limiting.
 
-Checks today (e2e `dev/e2e/e2e.mjs`, server/WS + API + gates, mock|real
-lanes): negotiate injects `accessToken` (shape a) · handshake consumes it
-(proven real by the WS-gate negatives) · publish/broadcast/unicast/group
-ops/history/presence/disconnect + partition/privacy · unauthenticated and
-scope-less negatives (401/403) · contract freeze drift gate (OC-1) · rate
-limiting (429 + `Retry-After`, per-lane ceilings — RL-1..4) · metrics scrape
-(MC-1). Latest: mock 51/51, real 42/42.
+## 7 · Public API Surface
 
-## 7 · Public surface (implemented vs planned)
+| Endpoint | Method | Scope / Auth | Purpose |
+|---|---|---|---|
+| `/healthz` | `GET` | None | Health check and auth configuration echo. |
+| `/openapi/v1.json` | `GET` | None | OpenAPI v1 specification document. |
+| `/metrics` | `GET` | None | Prometheus runtime and HTTP metrics (text/plain 0.0.4). |
+| `/realtime/hub/negotiate` | `POST` | Bearer (`ar-idp`) | Handshake negotiation and connection JWT issuance. |
+| `/realtime/hub` | `GET` (WS) | Bearer (`realtime-conn`) | WebSocket bus connection. |
+| `/api/publish` | `POST` | Bearer + Scope | Publish event to a single group. |
+| `/api/broadcast` | `POST` | Bearer + Scope | Publish event across multiple groups in partition. |
+| `/api/users/{sub}/send` | `POST` | Bearer + Scope | Global cross-service unicast send to a user. |
+| `/api/connections/{id}/send` | `POST` | Bearer + Scope | Unicast send to a specific connection within partition. |
+| `/api/connections/{id}/disconnect` | `POST` | Bearer + Scope | Forcibly close a connection within partition. |
+| `/api/groups` | `POST` | Bearer + Scope | Create or configure a group (idempotent). |
+| `/api/groups` | `GET` | Bearer | List groups, member counts, and online counts for caller's partition. |
+| `/api/groups/{g}/members` | `POST` | Bearer + Scope | Add user to group (immediate join + persisted). |
+| `/api/groups/{g}/members` | `DELETE` | Bearer + Scope | Remove user from group (immediate eviction + unpersisted). |
+| `/api/groups/{g}/presence` | `GET` | Bearer | Retrieve active member presence and socket counts. |
+| `/api/groups/{g}/history` | `GET` | Bearer + Scope | Query message history for opt-in groups. |
+| `/api/groups/{g}/history` | `DELETE` | Bearer + Scope | Clear message history for a group. |
 
-| Endpoint | State | Notes |
-|---|---|---|
-| `GET /healthz` | ✅ spike | auth config echo |
-| `POST /realtime/hub/negotiate` | ✅ spike | Bearer(IdP) in header → conn JWT out |
-| `GET /realtime/hub` (WS only) | ✅ spike | read-only clients; `event` method carries publications |
-| `POST /api/publish` `{group, data}` | ✅ spike | publisher scope; envelope stamping |
-| `POST /api/broadcast` | ⬜ Phase 2 | |
-| `POST /api/groups` `{name}` | ✅ 2026-11-07 | create group record, auto-scoped to bearer's partition; idempotent |
-| `POST /api/groups/{g}/members` `{user_id}` | ✅ 2026-11-07 | bearer's client_id scopes group + member; applies live + persists |
-| `DELETE /api/groups/{g}/members?user_id=…` | ✅ 2026-11-07 | same scoping; evicts live sockets |
-| `POST /api/users/{sub}/send` `{data}` | ✅ 2026-11-07 | cross-service unicast via `user_channel|{sub}`; NOT partition-scoped by design |
-| `POST /api/connections/{id}/send` `{data}` | ✅ 2026-11-07 | per-socket send, PARTITION-scoped: caller reaches only its own client's sockets (404 unknown / 403 foreign) |
-| `POST /api/broadcast` `{groups[], data}` | ✅ 2026-11-07 | one wire pass across groups; unknown groups reported (caller's partition only) |
-| `GET /api/groups` | ✅ 2026-11-07 | partition-private listing: `members` (persisted) + `online` (live identities) |
-| `GET /api/groups/{g}/presence` | ✅ 2026-11-07 | per-member identity rows decoded from physical keys; online + socket count |
-| `GET /api/groups/{g}/history` · `/history` clear | ✅ 2026-11-07 (Phase 3) | opt-in ring at group create (`history`, `history_size` ≤ 10 000, `history_ttl_seconds`); ascending tail + `total`; clear → `cleared:n` (disabled → 0) |
-| Prometheus metrics | ✅ 2026-11-07 | `prometheus-net.AspNetCore`: HTTP + runtime collectors; `GET /metrics` (text/plain 0.0.4); outside the /api group — unauthenticated, unrate-limited (scrape-safe); e2e MC-1 |
-| Rate limiting (fixed window per `client_id`) | ✅ 2026-11-07 | two lane ceilings (default 60/min; unicast send lanes 600/min); 429 `{error:"rate_limited"}` + `Retry-After`; e2e RL-1..4 |
-| Dockerfile + prod compose + Caddy route | ✅ compose base 2026-11-07 (Follow-up 13; container e2e 42/42) | Phase 5 adds the Caddy edge + wall decommission |
+## 8 · Operational Characteristics & Constraints
 
-Event wire convention (unchanged from the wall): the emitted event's identity
-is `data.type` (`chat_receive`, `ai_emission`, …), delivered as SignalR
-method `"event"`; `from` + `sent_at` are stamped server-side. Receivers
-ignore unknown types.
+* **In-memory state**: Group registry, active connection mappings, and history buffers are held in memory. State is reset on process restart.
+* **Single-process scope**: Group and connection tracking operates within the local process instance.
+* **Rate limiting**: Fixed-window counters are maintained in memory per `client_id` partition.
+* **Metrics isolation**: `/metrics` is unauthenticated and unrate-limited to facilitate automated scraping; bind this endpoint to an internal network interface.
 
-## 8 · Known limitations (spike stage)
-
-* Per-service group scoping (plan R4) is implemented — `GroupPartitioner`
-  namespaces every logical group (and every user identity) behind the
-  caller's `client_id`; cross-partition publishes are inherently isolated
-  and e2e-gated (PART-1..4, mock mode). The group service (plan §5.4) is
-  live: `POST /api/groups` + members ops with stored, reconnect-surviving
-  membership (e2e G-1..G-4 + GATE-2b). Remaining: group listing/counts,
-  presence, broadcast (Phase 2).
-* In-memory registry + root hub logging only: single process. (`/metrics`
-  is live — Phase 3.)
-* The publisher scope lane's 403 negative test runs only in mock mode (the
-  real IdP's `speedtest` client carries the publisher scope unconditionally).
-* No persistence — single process, deliberate spike scope. History is live
-  (Phase 3); rate limiting is fixed-window per `client_id` with no counter
-  persistence across restarts; metrics are scrape-live (`/metrics`) but
-  unauthenticated by design — bind it to the internal network at deploy
-  (Phase 5 compose).
-
-## 9 · Deployment shape (target, Phase 5)
+## 9 · Deployment
 
 ```bash
-bash dev/build-image.sh                       # stages nuget-feed/ then docker build
+# Build Docker image
+bash dev/build-image.sh
+
+# Run container with production secret
 CONN_TOKEN_SECRET=$(openssl rand -hex 32) docker compose up -d realtime
-docker inspect --format '{{.State.Health.Status}}' realtime   # → healthy
+
+# Verify health status
+docker inspect --format '{{.State.Health.Status}}' realtime
 ```
 
-Verified 2026-11-07: image builds, container reaches the REAL IdP authority,
-and the full real-lane e2e passes against the running container (42/42 incl.
-OC-1 contract gate + MC-1 metrics gate). The offline mock lane is a host-side
-dev tool (`dev/mock-idp` on localhost:9001) — inside the container the
-authority stays the real one (§5). `CONN_TOKEN_SECRET` is the only secret;
-rotation invalidates live connection tokens (clients re-negotiate: the IdP
-path stays untouched → no IdP rotation impact).
-
-* One container; single reverse-proxy route (`handle_path /websockets/*` —
-  name TBD) to one upstream. No bus/wall split, no Cloudflare-Access
-  prefix scoping traps, no file bind-mounts.
-* Rotating `CONN_TOKEN_SECRET` invalidates live connection tokens (clients
-  re-negotiate: the IdP path remains untouched → no IdP rotation impact).
-* The push-deploy story (gh_webhooks) stays as documented in the sibling
-  repo's `DEPLOY.md`, pointed at this repo's GHCR image.
+Rotating `CONN_TOKEN_SECRET` invalidates active connection JWTs and prompts clients to re-negotiate against the IdP. The IdP token and credentials are not affected by secret rotation.
