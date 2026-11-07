@@ -235,8 +235,10 @@ service's exhausted budget never affects another's.
 
 Your SPA's origin must be in `ALLOWED_ORIGINS` (comma list; one `*` = one
 subdomain label, e.g. `https://*.adolfrey.com`). Forbidden origins fail at
-preflight before auth is checked. The transport is WebSockets only, so your
-proxy must pass WS upgrades.
+preflight before auth is checked, and the hub negotiate and WebSocket handshake
+reject them with `403 forbidden_origin`. Requests with no `Origin` header
+(native/.NET clients) are not origin-checked. The transport is WebSockets only,
+so your proxy must pass WS upgrades.
 
 ## 5 · Mobile / native clients (.NET today; Swift/Java later)
 

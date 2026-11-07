@@ -25,7 +25,7 @@ namespace Realtime.Negotiate;
 /// (so rate limiting partitions on the verified client_id, §9), then pass
 /// through untouched — server API endpoints carry their own [Authorize].
 /// </summary>
-public sealed class SecurityFenceMiddleware(RequestDelegate next, IConnectionTokenService tokens, ILogger<SecurityFenceMiddleware> logger)
+public sealed class SecurityFenceMiddleware(RequestDelegate next, IConnectionTokenService tokens, OriginAllowList origins, ILogger<SecurityFenceMiddleware> logger)
 {
     private const string HubPath = "/realtime/hub";
 
@@ -46,6 +46,7 @@ public sealed class SecurityFenceMiddleware(RequestDelegate next, IConnectionTok
 
         if (HttpMethods.IsPost(context.Request.Method) && context.Request.Path == $"{HubPath}/negotiate")
         {
+            if (!await IsOriginAllowed(context)) return;
             await HandleNegotiate(context);
             return;
         }
@@ -58,6 +59,7 @@ public sealed class SecurityFenceMiddleware(RequestDelegate next, IConnectionTok
                 || (context.Request.Headers.Connection.ToString().Contains("Upgrade", StringComparison.OrdinalIgnoreCase)
                     && context.Request.Headers.Upgrade.ToString().Contains("websocket", StringComparison.OrdinalIgnoreCase))))
         {
+            if (!await IsOriginAllowed(context)) return;
             await HandleWebSocketHandshake(context);
             return;
         }
@@ -75,6 +77,23 @@ public sealed class SecurityFenceMiddleware(RequestDelegate next, IConnectionTok
         }
 
         await next(context);
+    }
+
+    // Browsers exempt WebSocket handshakes from CORS, so the hub path checks the
+    // Origin header itself (cross-site WebSocket hijacking). Requests without an
+    // Origin are non-browser clients (native/.NET) and are not origin-bound.
+    private async Task<bool> IsOriginAllowed(HttpContext context)
+    {
+        var origin = context.Request.Headers.Origin.ToString();
+        if (origin.Length == 0 || origins.IsAllowed(origin)) return true;
+
+        logger.LogWarning("hub: rejected origin {Origin} on {Path}", origin, context.Request.Path);
+        await WriteJson(context, StatusCodes.Status403Forbidden, new JsonObject
+        {
+            ["error"] = "forbidden_origin",
+            ["detail"] = "the request origin is not in ALLOWED_ORIGINS",
+        });
+        return false;
     }
 
     private async Task HandleNegotiate(HttpContext context)

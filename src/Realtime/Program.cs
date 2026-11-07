@@ -120,8 +120,10 @@ builder.Services.AddAuthorizationBuilder()
 
 // ── origin fence (CORS): plan R9 ────────────────────────────────────────────
 var origins = allowedOrigins.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+var originAllowList = new OriginAllowList(origins); // one '*' = one subdomain label — same glob rule as Centrifugo
+builder.Services.AddSingleton(originAllowList);
 builder.Services.AddCors(options => options.AddPolicy("origin-fence", policy => policy
-    .WithOrigins(origins) // one '*' = one subdomain label — same glob rule as Centrifugo
+    .SetIsOriginAllowed(originAllowList.IsAllowed)
     .AllowAnyHeader()
     .AllowAnyMethod()
     .SetPreflightMaxAge(TimeSpan.FromMinutes(10))));
