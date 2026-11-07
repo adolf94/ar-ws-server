@@ -75,6 +75,7 @@ public static class RealtimeApiEndpoints
     private static RouteGroupBuilder MapEndpoints(this IEndpointRouteBuilder app)
     {
         var endpoints = app.MapGroup("");
+        endpoints.RequireRateLimiting("partitioned");   // §9 fixed-window per client_id
 
         endpoints.MapPost("/publish",
             [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
@@ -260,6 +261,7 @@ public static class RealtimeApiEndpoints
         // `from` = the CALLING service's client_id. No store-and-forward.
         endpoints.MapPost("/users/{sub}/send",
             [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
+            [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("partitioned-send")] // §9 reasoning/stream lane
             async (string sub, SendUserRequest request, HttpContext http,
                 IHubContext<RealtimeHub> hubContext, IGroupPartitioner partitioner) =>
             {
@@ -289,6 +291,7 @@ public static class RealtimeApiEndpoints
         // scoped counterpart of the global user_channel unicast above.
         endpoints.MapPost("/connections/{id}/send",
             [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
+            [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("partitioned-send")] // §9 reasoning/stream lane
             async (string id, SendUserRequest request, HttpContext http,
                 IHubContext<RealtimeHub> hubContext, IGroupPartitioner partitioner,
                 IConnectionRegistry connections) =>

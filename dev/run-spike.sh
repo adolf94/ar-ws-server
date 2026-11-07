@@ -23,6 +23,8 @@ else
 fi
 
 echo "▶ starting realtime server on :5000 …"
+fuser -k 5000/tcp 2>/dev/null || true   # stale server from a previous lane would squat the health check
+sleep 0.5
 (cd src/Realtime &&
     CONN_TOKEN_SECRET="${CONN_TOKEN_SECRET:-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef}" \
     AUTH_AUTHORITY="$AUTH_AUTHORITY" \

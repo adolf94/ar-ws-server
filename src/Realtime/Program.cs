@@ -2,12 +2,14 @@ using System.IdentityModel.Tokens.Jwt;
 using System.Net.Http.Headers;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading.RateLimiting;
 using Ar.Auth.OpenId;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Http;
 using Microsoft.AspNetCore.Http.Connections;
+using Microsoft.AspNetCore.RateLimiting;
 using Microsoft.AspNetCore.SignalR;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Primitives;
@@ -32,6 +34,13 @@ var audience       = Conf("AUTH_AUDIENCE");                                     
 var allowedOrigins = Conf("ALLOWED_ORIGINS", "http://localhost:3000,https://*.adolfrey.com");
 var publishScope   = Conf("PUBLISH_REQUIRED_SCOPE", "api://ws-server/app:publisher");
 var connTokenTtl   = int.TryParse(Conf("CONN_TOKEN_TTL", ""), out var ttl) && ttl > 0 ? ttl : ConnectionTokenService.DefaultTtlSeconds;
+// §9 rate limiting: fixed-window per client_id partition
+var rateWindowSec  = int.TryParse(Conf("RATE_WINDOW_SECONDS", ""), out var rws) && rws > 0 ? rws : 60;
+var rateLimit      = int.TryParse(Conf("RATE_MAX_PER_WINDOW", ""), out var rls) && rls > 0 ? rls : 60;
+// the unicast lanes carry high-volume streams too — an AI reasoning backend
+// sending chain-of-thought deltas per chunk is the motivating use case — so
+// send addresses get their own (much higher) ceiling within the same window.
+var rateSendLimit  = int.TryParse(Conf("RATE_SEND_PER_WINDOW", ""), out var rsl) && rsl > 0 ? rsl : 600;
 var connSecret     = Conf("CONN_TOKEN_SECRET");
 
 void WarnBootstrap(string message)
@@ -119,12 +128,62 @@ builder.Services.AddCors(options => options.AddPolicy("origin-fence", policy => 
 // ── API surface (plan §5.3) ─────────────────────────────────────────────────
 builder.Services.AddOpenApi();                    // machine contract: /openapi/v1.json
 
+// §9: fixed-window, partitioned by the verified bearer's client_id
+// (anonymous requests → the "anon" partition). The claims must be resolvable
+// BEFORE this middleware runs, so the fence pre-authenticates every request
+// that presents an Authorization header (see §3).
+builder.Services.AddRateLimiter(options =>
+{
+    options.RejectionStatusCode = StatusCodes.Status429TooManyRequests;
+    options.OnRejected = (ctx, ct) =>
+    {
+        ctx.HttpContext.Response.Headers.RetryAfter = rateWindowSec.ToString();
+        ctx.HttpContext.Response.ContentType = "application/json";
+        return new ValueTask(ctx.HttpContext.Response.WriteAsJsonAsync(new
+        {
+            error = "rate_limited",
+            detail = $"this client_id partition exceeded its rate budget ({rateWindowSec}s window); retry after the window (see Retry-After)",
+        }, ct));
+    };
+
+    // default lane: reads, publish/broadcast, group + members ops, disconnect
+    options.AddPolicy<string>(
+        "partitioned",
+        httpContext => RateLimitPartition.GetFixedWindowLimiter(
+            // partition key: the verified client_id (fence eager-auth), anon otherwise
+            httpContext.User.GetClientId() ?? "anon",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = rateLimit,
+                Window = TimeSpan.FromSeconds(rateWindowSec),   // fixed window per partition
+                QueueLimit = 0,                                  // no queuing: refuse
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+            }));
+
+    // unicast lane (POST /api/users/{sub}/send, POST /api/connections/{id}/send):
+    // the reasoning/streaming lane — same per-client_id partition + window,
+    // but a ceiling far above the default lane. If a stream trips even this
+    // budget the 429 + Retry-After tells the caller when to resume.
+    options.AddPolicy<string>(
+        "partitioned-send",
+        httpContext => RateLimitPartition.GetFixedWindowLimiter(
+            httpContext.User.GetClientId() ?? "anon",
+            _ => new FixedWindowRateLimiterOptions
+            {
+                PermitLimit = rateSendLimit,
+                Window = TimeSpan.FromSeconds(rateWindowSec),
+                QueueLimit = 0,
+                QueueProcessingOrder = QueueProcessingOrder.OldestFirst,
+            }));
+});
+
 // ── pipeline ────────────────────────────────────────────────────────────────
 var app = builder.Build();
 
 app.UseCors("origin-fence");      // must precede the fence: preflights terminate here
 app.UseAuthentication();          // default scheme handling (challenge cosmetics)
-app.UseMiddleware<SecurityFenceMiddleware>(); // the §5.2 two-door fence
+app.UseMiddleware<SecurityFenceMiddleware>(); // the §5.2 two-door fence (+ eager auth for rate limiting)
+app.UseRateLimiter();             // §9: partitions need context.User set by the fence
 app.UseAuthorization();
 
 app.MapOpenApi();                 // /openapi/v1.json — contract freeze (plan §8 Phase 2 exit)

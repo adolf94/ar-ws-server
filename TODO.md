@@ -80,14 +80,15 @@
   human contract `docs/CONTRACT.md` (security law, envelope, endpoint
   matrix, scoping one-liners, versioning rule); e2e OC-1 gates the live
   doc against the snapshot — **mock 43/43, real 33/33**
-- [ ] Phase 3: history ring buffer (**opt-in core done 2026-11-07**:
+- [ ] Phase 3: history ring buffer (**done 2026-11-07**:
   `Connections/HistoryBuffer.cs`; `POST /api/groups` gains
   `history`/`history_size`/`history_ttl_seconds`; publish/broadcast append;
   `GET/DELETE /api/groups/{g}/history` live — e2e H-1..H-6 incl. opt-in
   respected and 404s; snapshot re-frozen → now **10 paths**, OC-1 red-on-drift
-  proved itself when it caught the new route pre-freeze). Remaining Phase 3:
-  prometheus metrics, per-client fixed-window rate limiting, Dockerfile +
-  compose
+  proved itself when it caught the new route pre-freeze). Also ✅ rate
+  limiting (**done 2026-11-07**, see Follow-up 11): fixed window per
+  `client_id`, two lane ceilings, e2e RL-1..4. Remaining Phase 3:
+  prometheus metrics, Dockerfile + compose
 - [ ] Phase 4: SPA migration (`centrifuge-js` → `@microsoft/signalr`),
   INTEGRATION.md rewrite (nucleus written: `docs/INTEGRATION.md`, phase-0
   contract — extend as Phases 1–3 land)
@@ -295,3 +296,37 @@ round-trip), confirm green, then `git add -A && git commit -m "phase-0 spike: ne
 - Next action: Phase 3 rest — prometheus metrics, per-client_id
   fixed-window rate limiting (the 429 story), Dockerfile + compose;
   then Phase 4 SPA migration against the frozen v1 contract.
+
+**Follow-up 11 — 2026-11-07 (rate limiting — the 429 story + AI reasoning):**
+- Middleware-level budgeting, ASP.NET's built-in
+  `AddRateLimiter`/`FixedWindowRateLimiter` (no new package):
+  **fixed window per `client_id`** partition — the fence gained a third
+  behavior: eager best-effort `AuthenticateAsync("ar-idp")` for ANY request
+  with an `Authorization` header, so the limiter partitions on the VERIFIED
+  client_id before the endpoint runs (auth outcomes unchanged; `[Authorize]`
+  still challenges). Anonymous → the `anon` partition.
+- **Two lane ceilings in one window** (`RATE_WINDOW_SECONDS`, default 60 s):
+  `partitioned` policy = `RATE_MAX_PER_WINDOW` 60 (reads, publish/broadcast,
+  group + members ops, disconnect) and `partitioned-send` =
+  `RATE_SEND_PER_WINDOW` 600, applied per-endpoint on the two unicast lanes.
+  Motivation: **AI reasoning / chain-of-thought streaming** — a backend
+  pushing deltas through `users/{sub}/send` per chunk lands hundreds of
+  calls/minute; a naive global budget would 429 mid-stream. Endpoint-level
+  `EnableRateLimiting` metadata REPLACES the group-level one (verified in
+  the ASP.NET source: `GetMetadata` returns the nearest metadata), so lanes
+  don't stack limiters.
+- 429 story: `{error:"rate_limited", detail}` + `Retry-After` (window
+  seconds) — `OnRejected` global handler, `RejectionStatusCode` 429.
+- e2e RL-1..4 (run LAST, after OC-1: tripping the window must not poison
+  other gates): RL-1 burst publish until 429 + envelope/Retry-After shape;
+  RL-2 another client_id still 200 during the exhausted window (mock);
+  RL-3 send lane trips its OWN 429 at attempts≈lane budget (596) proving
+  lane isolation; RL-4 probe on send lane → 404 (handler answered, not 429).
+  Lanes: **mock 53/53, real 41/41**. Snapshot unchanged (no path/schema
+  delta) — OC-1 stays green without re-freeze.
+- Docs: CONTRACT §2 bullet + new §2.1; TECH config rows + fence §3 +
+  surface table; INTEGRATION §4.4 (integrator guidance incl. batching
+  deltas, `Retry-After` resume); TODO + run-spike now kills a stale :5000
+  listener before boot (bit us twice across lanes today).
+- Next action: Phase 3 rest — prometheus metrics (`prometheus-net`,
+  `/metrics`), Dockerfile + compose; then Phase 4 SPA migration.

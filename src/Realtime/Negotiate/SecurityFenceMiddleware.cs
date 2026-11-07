@@ -21,8 +21,9 @@ namespace Realtime.Negotiate;
 ///   • GET /realtime/hub (WS upgrade) — authenticate with the connection
 ///     scheme; the principal carries the minted identity into the hub.
 ///
-/// Everything else passes through untouched (server API endpoints carry
-/// their own [Authorize]).
+/// Everything else: eager-auth on any request with an Authorization header
+/// (so rate limiting partitions on the verified client_id, §9), then pass
+/// through untouched — server API endpoints carry their own [Authorize].
 /// </summary>
 public sealed class SecurityFenceMiddleware(RequestDelegate next, IConnectionTokenService tokens, ILogger<SecurityFenceMiddleware> logger)
 {
@@ -59,6 +60,18 @@ public sealed class SecurityFenceMiddleware(RequestDelegate next, IConnectionTok
         {
             await HandleWebSocketHandshake(context);
             return;
+        }
+
+        // ── eager auth (owner-approved rate limiting, §9): every non-hub
+        // request presenting an Authorization header pre-authenticates so
+        // the rate limiter partitions on the VERIFIED client_id. Best-effort:
+        // no token / invalid token falls through untouched — the endpoint's
+        // own [Authorize] will still challenge with the proper 401/403.
+        if (context.Request.Headers.Authorization.Count > 0)
+        {
+            var eagerAuth = await context.AuthenticateAsync(AuthSchemes.Idp);
+            if (eagerAuth.Succeeded && eagerAuth.Principal is not null)
+                context.User = eagerAuth.Principal;
         }
 
         await next(context);

@@ -515,6 +515,77 @@ check('OC-1. live OpenAPI paths == frozen docs/openapi-v1.json',
     && snapPaths.includes('/api/users/{sub}/send') && snapPaths.includes('/healthz'),
   snapPaths === livePaths ? `${livePaths.split(',').length} paths` : `frozen=[${snapPaths}] live=[${livePaths}]`);
 
+// ── rate limiting: fixed window per client_id (§9) ──────────────────────────
+// Runs LAST on purpose: tripping this client's partition must not poison any
+// earlier gate (the window keeps counting until it rolls over).
+let saw429 = false;
+let attempts = 0;
+for (; attempts < 500 && !saw429; attempts++) {
+  const res = await fetch(`${SRV}/api/publish`, {
+    method: 'POST',
+    headers: authHdrs,
+    body: JSON.stringify({ group: 'ghost-group', data: { type: 'chat_receive', text: 'burst' } }),
+  });
+  if (res.status === 429) {
+    saw429 = true;
+    const body = await res.json().catch(() => ({}));
+    const retryAfter = Number(res.headers.get('retry-after'));
+    check('RL-1. burst tripped 429 with rate_limited envelope + Retry-After',
+      body.error === 'rate_limited' && Number.isFinite(retryAfter) && retryAfter > 0
+        && typeof body.detail === 'string',
+      `attempts=${attempts + 1} retry-after=${retryAfter} body=${JSON.stringify(body)}`);
+  }
+}
+if (!saw429) check('RL-1. burst tripped 429 with rate_limited envelope + Retry-After', false,
+  `no 429 after ${attempts} attempts (limit not reached?)`);
+
+if (MODE === 'mock' && saw429 && freshlyMinted) {
+  // Partition isolation: another client_id's window is untouched even while
+  // the caller's partition is exhausted.
+  const probeToken = await mintMock({ sub: '42', scope: PUBLISHER_SCOPE, client_id: 'rate-probe' });
+  const probe = await fetch(`${SRV}/api/publish`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${probeToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ group: 'ghost-group', data: { type: 'chat_receive', text: 'probe' } }),
+  });
+  check('RL-2. other client_id unaffected during exhausted window → 200',
+    probe.status === 200, `status=${probe.status}`);
+}
+
+// Send lane (reasoning/streaming budget): separate, far higher ceiling but
+// the same per-client_id partition + window. Unknown connection → fast 404s,
+// each still consuming a send-lane permit (limiter runs before the handler).
+let send429 = false;
+let sendAttempts = 0;
+for (; sendAttempts < 700 && !send429; sendAttempts++) {
+  const res = await fetch(`${SRV}/api/connections/${encodeURIComponent('no-such-connection')}/send`, {
+    method: 'POST', headers: authHdrs,
+    body: JSON.stringify({ data: { type: 'notify_receive', text: 'send-burst' } }),
+  });
+  if (res.status === 429) {
+    send429 = true;
+    const body = await res.json().catch(() => ({}));
+    const retryAfter = Number(res.headers.get('retry-after'));
+    check('RL-3. send lane tripped its own 429 (lane budgets are separate)',
+      body.error === 'rate_limited' && Number.isFinite(retryAfter) && retryAfter > 0,
+      `attempts=${sendAttempts + 1} retry-after=${retryAfter}`);
+  }
+}
+if (!send429) check('RL-3. send lane tripped its own 429 (lane budgets are separate)', false,
+  `no 429 after ${sendAttempts} attempts (limit not reached?)`);
+
+if (MODE === 'mock' && send429 && freshlyMinted) {
+  const probeToken = await mintMock({ sub: '42', scope: PUBLISHER_SCOPE, client_id: 'rate-probe' });
+  const probe = await fetch(`${SRV}/api/connections/${encodeURIComponent('no-such-connection')}/send`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${probeToken}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ data: { type: 'notify_receive', text: 'send-probe' } }),
+  });
+  // 404 (got THROUGH the exhausted partition, handler answered) — not 429.
+  check('RL-4. send lane: other client_id unaffected during exhausted window → 404 not 429',
+    probe.status === 404, `status=${probe.status} (expect handler's 404, not 429)`);
+}
+
 if (String(userClaims.scope ?? '').length === 0) {
   console.log('⚠ cached/env token carries NO scopes — publish scope checks may FAIL; refresh via dev/e2e/mint-token.mjs');
 }

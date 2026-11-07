@@ -66,7 +66,7 @@ public sealed class InMemoryHistoryBuffer : IHistoryBuffer
             // clone: one stamped instance may already be fanned out to
             // several groups; buffers must not share mutable nodes
             var ttl = ring.TtlSeconds is { } t ? DateTimeOffset.UtcNow.AddSeconds(t).UtcDateTime : (DateTime?)null;
-            ring.Items.Add(new Entry(JsonNode.Parse(data.ToJsonString()), ttl));
+            ring.Items.Add(new Entry(JsonNode.Parse(data.ToJsonString()) ?? new JsonObject(), ttl));
             while (ring.Items.Count > ring.Size)
                 ring.Items.RemoveAt(0);
         }

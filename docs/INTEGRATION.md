@@ -212,7 +212,26 @@ never collide and one service cannot publish into another's groups.
   silently reaches nobody. The "404 if group unknown" behavior arrives with the
   group service (Phase 1). Until then, a typo'd group name fails silently.
 
-### 4.4 · CORS / origins
+### 4.4 · Rate limiting (2026-11-07)
+
+Every `/api/*` call draws from a **fixed window per `client_id`** partition:
+default lane 60/window (reads, publish/broadcast, group + members ops,
+disconnect), unicast send lanes 600/window (`users/{sub}/send`,
+`connections/{id}/send`) — `RATE_WINDOW_SECONDS` = 60 s by default. One
+service's exhausted budget never affects another's.
+
+* Tripping it → `429 {error:"rate_limited", detail}` + `Retry-After`
+  (seconds until the window rolls over). On 429: **pause input work and
+  retry at `Retry-After`** — do not spin (a spinning retry just draws more
+  from the same exhausted partition once the window opens).
+* **AI reasoning / chain-of-thought streaming** is the intended load on the
+  unicast lanes: batch model deltas into reasonably sized chunks (per token
+  group or small timer flush, not one HTTP call per token). If a very long
+  stream still trips the budget, the stall is visible as exactly one 429
+  (not a timeout) and the `Retry-After` seconds say precisely when to
+  resume the same stream.
+
+### 4.5 · CORS / origins
 
 Your SPA's origin must be in `ALLOWED_ORIGINS` (comma list; one `*` = one
 subdomain label, e.g. `https://*.adolfrey.com`). Forbidden origins fail at
@@ -240,9 +259,11 @@ header as well as `?access_token=` (`docs/TECH.md` §2).
 
 ## 7 · Environment knobs for integrators
 
-* `ALLOWED_ORIGINS` — CORS allow-list (§4.4).
+* `ALLOWED_ORIGINS` — CORS allow-list (§4.5).
 * `AUTH_AUTHORITY` (+ `AUTH_AUDIENCE` to pin `aud`) — IdP issuer.
 * `PUBLISH_REQUIRED_SCOPE` — publisher scope (§4).
+* `RATE_WINDOW_SECONDS` / `RATE_MAX_PER_WINDOW` / `RATE_SEND_PER_WINDOW` —
+  rate budget knobs (§4.4).
 
 The full table lives in `docs/TECH.md` §5. `GET /healthz` echoes the effective
 auth configuration — useful when a browser client gets an unexpected 401 at

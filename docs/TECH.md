@@ -100,8 +100,12 @@ Single middleware, exact-path dispatch, wired after `UseAuthentication`:
   `HttpContext.WebSockets.IsWebSocketRequest`, which reported false for a
   perfectly valid node-client upgrade; the e2e's GATE-1c/1d checks prove
   anonymous/garbage upgrades are rejected (anti-false-pass for WS-2).
-* Everything else (server API, health) passes through untouched — those
-  endpoints carry their own `[Authorize]`.
+* Everything else: **eager auth** on any request with an `Authorization`
+  header (best-effort `AuthenticateAsync("ar-idp"); on success the principal
+  is placed on `context.User`, failures fall through untouched) — this feeds
+  the §9 rate limiter, which needs the verified `client_id` BEFORE the
+  endpoint runs. Endpoints still carry their own `[Authorize]`, so auth
+  outcomes are unchanged; then the request passes through.
 
 Shape (a) (normal negotiate response + accessToken) is **verified working**
 with `@microsoft/signalr` — the e2e WS-1/WS-2 checks prove the client
@@ -131,11 +135,11 @@ misbehaves.
 | `dev/e2e/mint-token.mjs` | Refreshes the e2e token cache without running tests. |
 | `dev/run-spike.sh` | Boots (mock|real) stack and runs the e2e. |
 
-Runtime packages: `Ar.Auth.OpenId` 1.2.0-local (local NuGet feed, from the
-`ar-auth` sibling repo; 1.2.0 fixes http-authority discovery for the mock IdP
-lane — `ArAuthClient` now sets `HttpDocumentRetriever.RequireHttps` based on
-the authority scheme), `Microsoft.AspNetCore.Authentication.JwtBearer` 10.0.0.
-`NuGet.config`), `Microsoft.AspNetCore.Authentication.JwtBearer` 10.0.0.
+Runtime packages: `Ar.Auth.OpenId` 1.2.0-local from the `ar-auth` sibling
+repo's local NuGet feed (`NuGet.config`; 1.2.0 fixes http-authority discovery
+for the mock IdP lane — `ArAuthClient` now sets
+`HttpDocumentRetriever.RequireHttps` based on the authority scheme),
+`Microsoft.AspNetCore.Authentication.JwtBearer` 10.0.0.
 SignalR itself ships in the shared framework.
 
 ## 5 · Configuration (environment)
@@ -148,6 +152,9 @@ SignalR itself ships in the shared framework.
 | `PUBLISH_REQUIRED_SCOPE` | `api://ws-server/app:publisher` | Scope required by the `publisher` policy on `/api/*`. |
 | `CONN_TOKEN_SECRET` | *(ephemeral random in dev, warned at boot)* | HMAC key for connection JWTs. ≥ 32 bytes. Prod: `openssl rand -hex 32`. The **only** secret. |
 | `CONN_TOKEN_TTL` | `300` | Connection JWT TTL seconds (≤ 5 min per plan). |
+| `RATE_WINDOW_SECONDS` | `60` | Fixed-window length for rate limiting (§9). |
+| `RATE_MAX_PER_WINDOW` | `60` | Default-lane ceiling per `client_id` partition per window (reads, publish/broadcast, group + members ops, disconnect). |
+| `RATE_SEND_PER_WINDOW` | `600` | Unicast-lane ceiling per `client_id` partition per window (`users/{sub}/send`, `connections/{id}/send`) — sized for high-volume reasoning/streaming sends. |
 | `ASPNETCORE_URLS` | — | e.g. `http://localhost:5000`. |
 | `ASPNETCORE_ENVIRONMENT` | — | `Development` enables detailed hub errors. |
 
@@ -173,13 +180,13 @@ Token source priority: `IDP_TOKEN` env → `.idp-token-cache.json` ( refreshed
 via `node dev/e2e/mint-token.mjs`) → fresh mint (authority round-trip only as
 a fallback). No secret or full token is ever printed — decoded claims only.
 
-Checks today: negotiate injects `accessToken` (shape a) · handshake consumes
-it (proven real by the WS-gate negatives) · publish → 200 · publication
-received with `from`/`sent_at` · unauthenticated publish → 401 · tokenless
-negotiate → 401 · WS upgrade without/garbage connection token → rejected ·
-(mock mode only) scopeless publish → 403. Latest full real-IdP run: 9/9 PASS;
-latest server/WS-only run: 8/8 PASS with hub identity verified
-(`connected: user=speedtest`).
+Checks today (e2e `dev/e2e/e2e.mjs`, server/WS + API + gates, mock|real
+lanes): negotiate injects `accessToken` (shape a) · handshake consumes it
+(proven real by the WS-gate negatives) · publish/broadcast/unicast/group
+ops/history/presence/disconnect + partition/privacy · unauthenticated and
+scope-less negatives (401/403) · contract freeze drift gate (OC-1) · rate
+limiting (429 + `Retry-After`, per-lane ceilings — RL-1..4). Latest: mock
+53/53, real 41/41.
 
 ## 7 · Public surface (implemented vs planned)
 
@@ -199,7 +206,8 @@ latest server/WS-only run: 8/8 PASS with hub identity verified
 | `GET /api/groups` | ✅ 2026-11-07 | partition-private listing: `members` (persisted) + `online` (live identities) |
 | `GET /api/groups/{g}/presence` | ✅ 2026-11-07 | per-member identity rows decoded from physical keys; online + socket count |
 | `GET /api/groups/{g}/history` · `/history` clear | ✅ 2026-11-07 (Phase 3) | opt-in ring at group create (`history`, `history_size` ≤ 10 000, `history_ttl_seconds`); ascending tail + `total`; clear → `cleared:n` (disabled → 0) |
-| Prometheus metrics, rate limiting | ⬜ Phase 3 | |
+| Prometheus metrics | ⬜ Phase 3 | |
+| Rate limiting (fixed window per `client_id`) | ✅ 2026-11-07 | two lane ceilings (default 60/min; unicast send lanes 600/min); 429 `{error:"rate_limited"}` + `Retry-After`; e2e RL-1..4 |
 | Dockerfile + prod compose + Caddy route | ⬜ Phase 5 | single route, no bus/wall split |
 
 Event wire convention (unchanged from the wall): the emitted event's identity
@@ -219,8 +227,9 @@ ignore unknown types.
 * In-memory registry + root hub logging only: single process, no metrics.
 * The publisher scope lane's 403 negative test runs only in mock mode (the
   real IdP's `speedtest` client carries the publisher scope unconditionally).
-* No rate limiting, no history, no persistence — deliberately out of
-  Phase-0 scope.
+* No metrics, no persistence — deliberately out of Phase-0 scope. History
+  is live (Phase 3); rate limiting is fixed-window per `client_id`,
+  no persistence of counters across restarts (a restart resets budgets).
 
 ## 9 · Deployment shape (target, Phase 5)
 

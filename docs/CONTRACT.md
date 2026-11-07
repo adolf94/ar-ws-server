@@ -37,7 +37,28 @@ Every non-2xx: `{ "error": "<code>", "detail": "<human hint>" }`
 · 400 validation (`…_required`, `…_invalid`) · 401 invalid/missing bearer ·
 403 valid bearer, wrong scope (`GATE-2`) or foreign connection
 (`connection_not_in_partition`) · 404 unknown group/connection
-(`group_not_found`, `connection_not_found`).
+(`group_not_found`, `connection_not_found`) · **429 rate_limited**
+(added 2026-11-07, additive — see §2.1).
+
+## 2.1 · Rate limiting (added 2026-11-07)
+
+Fixed window per `client_id` partition (the one scope key again — anonymous
+harness storms share the `anon` partition):
+
+* **Two lane ceilings, one window** (`RATE_WINDOW_SECONDS`, default 60 s):
+  * default lane (reads, publish/broadcast, group + members ops, disconnect):
+    `RATE_MAX_PER_WINDOW` (default 60);
+  * unicast send lanes (`POST /api/users/{sub}/send`,
+    `POST /api/connections/{id}/send`): `RATE_SEND_PER_WINDOW` (default 600) —
+    reserved for high-volume streams, notably **AI reasoning /
+    chain-of-thought delivery** (batch deltas into reasonably sized chunks —
+    e.g. per token-group, not per token).
+* Rejections: HTTP 429 + `Retry-After` (seconds until the window rolls)
+  + the standard error envelope with `error:"rate_limited"`.
+* Envelope-wise the same for every endpoint; a caller's exhausted budget
+  never affects another `client_id` (e2e RL-2/RL-4).
+* Not reflected in `openapi-v1.json` (no path/response-schema changes), so
+  the frozen snapshot stays byte-identical; OC-1 still drift-guards it.
 
 ## 3 · Event envelope (all sends delivered as SignalR method `"event"`)
 
