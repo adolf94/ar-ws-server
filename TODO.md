@@ -417,3 +417,28 @@ round-trip), confirm green, then `git add -A && git commit -m "phase-0 spike: ne
   full client sweep green — ts 12 gates ALL PASS, dotnet 8/8, python 8/8 —
   and both e2e lanes re-verified: mock 54/54, real 42/42. Phase 4 CLOSED.
   (Owner's doc condensation still uncommitted in the tree — left as-is.)
+
+**Follow-up 15 — 2026-11-07 (Phase 5 deploy artifacts + edge rehearsal):**
+- `deploy/docker-compose.yml` — prod/gh_webhooks target mirroring the wall's
+  deploy shape: `IMAGE=<sha>` required, NO host ports, explicit env map,
+  healthcheck, `realtime` internal net + external `proxy` net (central Caddy).
+- `deploy/caddy-route.caddy` — ONE public prefix (`/realtime-v2`, plan §7.4)
+  preserving the service's canonical paths: single `handle_path` strip +
+  explicit deny for `/metrics`, `/openapi`, `/healthz` (ops door internal-only).
+  Cloudflare Access scoping warning carried over from the wall compose.
+- **Edge rehearsal PROVEN locally** (`dev/edge-rehearsal.sh` — caddy:2 replica
+  + PROD-shaped realtime container): the FULL e2e suite drove only the edge
+  (SRV=edge, EDGE=/realtime-v2, SRV_OPS=internal ops door) — **54/54 PASSED**,
+  incl. WS upgrade, negotiate fence, fan-out, partition isolation, history,
+  presence, disconnects, 429 Retry-After; edge surface check → metrics/openapi
+  edge-404. `dev/e2e/e2e.mjs` gained `EDGE`/`SRV_OPS` envs (direct mode
+  unchanged; metrics+openapi gates always hit the ops door).
+- iss discipline lesson: token `iss` is compared VERBATIM against the
+  container's `AUTH_AUTHORITY` — the mock IdP now mints with the
+  `host.docker.internal:9001/realms/demo` issuer string on all legs.
+- TECH §9 extended with the edge/cutover runbook in condensed style.
+- Owner-side pieces (NOT mine to run): `.github/workflows/deploy-gh-webhooks.yml`
+  (user-authored CI: build→push ghcr + signed webhook) is UNTRACKED — user's
+  WIP; actual central-Caddy paste + wall decommission happen on the deploy
+  host (apis host). Demo SPA still rides `/websockets/*` → wall cutoff is an
+  owner decision after burn-in.
