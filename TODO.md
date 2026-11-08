@@ -231,6 +231,16 @@ publish.
   senders treat connection 404 as the fallback cue to user-channel sends.
   Tests green: server spike 54/54 with new gates CONN-1/2/3, ts conformance
   ALL PASS.
+- [x] Send-lane fence diagnostics (2026-11-08 — for the 403 `notig-ingester`
+  hit): the per-connection 403/404 branches now LOG the partition pair
+  server-side (`Realtime.SendLanes` logger): 403 = **Warning** —
+  `send-to-connection {id}: caller partition=X != owner partition=Y
+  (owner=…|sub)`; both 404 (`connection_not_found` unknown-id probes,
+  `connection_not_connected` reconnect-pending) = **Debug**. Response
+  envelopes unchanged. Production-mode verified against the mock lane: the
+  Warning is visible by default, the Debug lines surface with
+  `Logging__LogLevel__Realtime=Debug` in the compose env. e2e unchanged
+  (log-only behavior; no response shape to gate).
 - [x] Harness: `bash dev/test-clients.sh [ts|dotnet|python]` — boots the
   mock lane, then runs each lib's suite against it (self-skipping tests
   stay green without a stack).
