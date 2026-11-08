@@ -66,9 +66,19 @@ with publisher.coalesced_send_to_user(user_sub) as chunk_timeline:
 # context exit flushes the remainder; the last error propagates exactly once
 ```
 
-Explicit form when you want the stats: `handle.drain()` → it raises the last
-`RealtimeApiError` of a failed batch (then re-serves idempotent stats).
-429s honor `Retry-After` and re-send the SAME batch once; the second 429 drops
+Per-TAB CoT streams ride the **connection lane** the same way —
+`coalesced_send_to_connection(connection_id)` (`offer`/`drain` semantics
+identical; independent single-flight windows per tab so each TAB's ordering is
+its own). A closed or foreign connection id surfaces as the non-429 drop path
+(404/403): the batch drops, the stream continues, `drain()` raises it once.
+The connection id comes from the SPA (it knows its own socket id — pass it in
+the job request that starts the stream).
+
+Explicit form when you want the stats: `handle.drain()` → it re-raises the
+last batch failure once (typically `RealtimeApiError`; then the same stats,
+`offered`/`flushed`/`dropped`/`publishes`/`last_error`, are re-served
+idempotently). A first 429 waits out `Retry-After` (60 s fallback if the
+header is absent) and re-sends the SAME batch once; a second failure drops
 the batch (counted in `.dropped`) and the stream continues. The wire contract
 is CONTRACT §3.1: one request per flush carrying `{type, batch, batch_v: 1}`.
 `coalesced_send_to_user(user_sub, max_pending_chars=64_000)` bounds queued-but-

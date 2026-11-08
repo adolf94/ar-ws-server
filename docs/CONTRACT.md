@@ -67,18 +67,27 @@ Fixed window per `client_id` partition (anonymous callers share the `anon` parti
 ### 3.1 · Client-side coalescing batch (`batch_v`, optional, publisher SDKs only)
 
 The event envelope can carry several original events from one coalesced flush
-(ar-realtime-client `coalesced_send_to_user` / Ar.Realtime.Client
-`CoalescedSendToUser` — handover spec 2026-11-08: single-flight publishing so a
-reasoning stream batchifies instead of stalling the producer on RTT):
+(publisher SDKs — handover spec 2026-11-08: single-flight publishing so a
+reasoning stream batchifies instead of stalling the producer on RTT).
+Entry points: python `coalesced_send_to_user(sub)` / `coalesced_send_to_connection(id)`
+(`ar-realtime-client`), .NET `CoalescedSendToUser(sub)` / `CoalescedSendToConnection(id)`
+(`Ar.Realtime.Client`); the connection lane posts the same envelope to
+`POST /api/connections/{id}/send`.
 
 ```json
 { "type": "<stream type>", "batch": [ <chunk1>, <chunk2>, … ], "batch_v": 1, "from": …, "sent_at": … }
 ```
 
 * `batch` chunks ride VERBATIM (each keeps its own `type`/payload); the outer
-  `type` (the stream identity) is the first chunk's type in v1.1.
+  `type` (the stream identity) is the handle's first chunk's type under
+  `batch_v: 1` and stays pinned for that stream's lifetime (both SDKs keep it
+  in a once-set `stream_type` field).
 * `batch_v: 1` keeps renderers forward compatible (new envelope additions
   would bump it).
+* SDK flush discipline: at most ONE in-flight publish per handle — request N+1
+  is sent only after N's response, so offer order is preserved and a retried
+  batch can never reorder (PC-2/PC-3 tests); one request per flush carries
+  everything pending at the flush boundary.
 * Server-side this is ONE event: one envelope, one `from`/`sent_at` stamp, one
   rate-limit unit, and — when the group has history — one history row.
 * Consumers replaying coalesced deltas loop over `batch` items exactly like

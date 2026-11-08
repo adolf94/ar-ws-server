@@ -88,7 +88,15 @@ public class CoalescedSendTests
             await Task.Delay(50, ct).ConfigureAwait(false);
             lock (_lock) _flight--;
 
-            var responses = "{\"ok\":true,\"user_id\":\"u\",\"group\":\"g\",\"partition\":\"p\"}";
+            // error-shaped envelopes for non-2xx — CONTRACT §2, real-server shape
+            var responses = status == 200
+                ? "{\"ok\":true,\"user_id\":\"u\",\"group\":\"g\",\"partition\":\"p\",\"connection_id\":\"c\",\"connection_partition\":\"p\"}"
+                : status switch
+                {
+                    404 => "{\"error\":\"connection_not_found\",\"detail\":\"status 404\"}",
+                    403 => "{\"error\":\"connection_not_in_partition\",\"detail\":\"status 403\"}",
+                    _ => "{\"error\":\"request_failed\",\"detail\":\"status " + status + "\"}",
+                };
             var payload = Encoding.UTF8.GetBytes(responses);
             context.Response.StatusCode = status;
             if (status == 429) context.Response.Headers["Retry-After"] = "1";
@@ -352,5 +360,64 @@ public class CoalescedSendTests
         Assert.Throws<RealtimeValidationException>(() => handle.Offer(new JsonObject { ["text"] = "no type" }));
         Assert.Throws<RealtimeValidationException>(() => handle.Offer(null!));
         Assert.Empty(stub.Envelopes);                             // nothing ever hit the wire
+    }
+
+    // ── PC-8: the connection lane (per-tab CoT streams) ──────────────────────
+
+    [Fact]
+    public async Task PC8a_connection_lane_carries_order_and_envelope()
+    {
+        var (publisher, stub) = NewLane();
+        await using var handle = publisher.CoalescedSendToConnection("tab-1");
+        handle.Offer(Chunk("t1.1"));
+        handle.Offer(Chunk("t1.2"));
+        await Task.Delay(500);                                    // flush #1: [t1.1, t1.2]
+        handle.Offer(Chunk("t1.3"));
+        var stats = await handle.CompleteAsync();
+
+        // flush COUNT is scheduler-dependent (t1.1 may detach before t1.2) —
+        // the contract is: no drops, every chunk delivered exactly once, order kept
+        Assert.InRange(stats.Publishes, 2, 3);
+        Assert.Equal(3, stats.Flushed);
+        Assert.Equal(0, stats.Dropped);
+        Assert.Equal(["t1.1", "t1.2", "t1.3"], Delivered(stub));
+        Assert.Equal("reclassifyThinking", stub.Envelopes[0]["data"]!["type"]!.GetValue<string>());
+        Assert.Equal(1, stub.Envelopes[0]["data"]!["batch_v"]!.GetValue<int>());
+    }
+
+    [Fact]
+    public async Task PC8b_connection_lane_dead_socket_drops_without_hang()
+    {
+        var (publisher, stub) = NewLane();
+        // every flush before the survivor fails 404 — whether the pre-settle
+        // chunks batch together or split is scheduler-dependent; the CONTRACT
+        // is: 404 ⇒ same-batch-once is NOT retried (non-429), the batch drops,
+        // the stream continues, CompleteAsync raises the last one exactly once
+        stub.ScriptedStatuses.AddRange([404, 404, 200, 200, 200]);
+        await using var handle = publisher.CoalescedSendToConnection("gone-tab");
+        handle.Offer(Chunk("c1"));
+        handle.Offer(Chunk("c2"));
+        await Task.Delay(300);                                    // these flush(s) fail 404
+        handle.Offer(Chunk("survivor-1"));                        // stream continues on this handle
+
+        var raised = await Assert.ThrowsAsync<RealtimeApiException>(() => handle.CompleteAsync());
+        Assert.Equal(404, raised.StatusCode);
+        Assert.Equal("connection_not_found", raised.ErrorCode);
+
+        var stats = await handle.CompleteAsync();
+        Assert.Equal(2, stats.Dropped);                            // c1 + c2 — never leaked, always accounted
+        Assert.Equal(1, stats.Flushed);                            // only the survivor batch
+        Assert.Equal(1, stats.Publishes);
+        var batch = stub.Envelopes[^1]["data"]!["batch"]!.AsArray();
+        Assert.Equal(["survivor-1"], batch.Select(c => c!["text"]!.GetValue<string>()).ToArray());
+    }
+
+    [Fact]
+    public void PC8c_connection_lane_rejects_bad_targets_eagerly()
+    {
+        var (publisher, stub) = NewLane();
+        Assert.Throws<RealtimeValidationException>(() => publisher.CoalescedSendToConnection(""));
+        Assert.Throws<RealtimeValidationException>(() => publisher.CoalescedSendToConnection("   "));
+        Assert.Empty(stub.Envelopes);
     }
 }

@@ -94,13 +94,19 @@ A single middleware placed after `UseAuthentication`:
 | Package | Side | Notes |
 |---|---|---|
 | `@adolf94/realtime-client` (clients/ts) | consumer | hub subscription over negotiate-issued tokens; Cloudflare-safe UA. |
-| `ar-realtime-client` (clients/python, 0.1.1) | publisher | full server-API surface (uv/httpx); **coalesced send**: `coalesced_send_to_user(sub)` — single-flight publishing (one in-flight request per stream, batches self-tune to `generation_rate × RTT`), `offer()`/`drain()` semantics, 429 → `Retry-After` honored with one same-batch retry then drop+record. |
-| `Ar.Realtime.Client` (clients/dotnet, 0.1.0-local) | publisher | mirrors the python SDK, async-native: `CoalescedSendToUser(sub, CoalesceOptions?)` → `ICoalescedSendHandle` (`Offer` / `CompleteAsync` / `Snapshot`), identical semantics, `IRealtimePublisher` interface member. |
+| `ar-realtime-client` (clients/python, 0.1.1) | publisher | full server-API surface (uv/httpx); **coalesced send**: `coalesced_send_to_user(sub)` and `coalesced_send_to_connection(id)` (per-TAB streams on one socket), both take `max_pending_chars=64_000` → `CoalescedSendHandle`. Single-flight publishing (one in-flight request per handle, batches self-tune to `generation_rate × RTT`), drop-oldest pending shedding, `offer()`/`drain()`/`stats()` (`CoalesceStats`); 429 → `Retry-After` honored with one same-batch retry then drop+record. |
+| `Ar.Realtime.Client` (clients/dotnet, 0.1.0-local) | publisher | mirrors the python SDK, async-native: `CoalescedSendToUser(sub, CoalesceOptions?)` and `CoalescedSendToConnection(id, CoalesceOptions?)` (`CoalesceOptions.MaxPendingChars`, default 64 000) → `ICoalescedSendHandle` (`Offer` / `CompleteAsync` / `Snapshot`), identical semantics, `IRealtimePublisher` interface members. |
 
 Both publishers implement the CONTRACT §3.1 batch envelope: a flush is ONE
-`POST /api/users/{sub}/send` carrying `{type, batch, batch_v:1}` with the
-original chunks verbatim — one rate-limit unit per flush instead of one per
-chunk (the AI-reasoning token lane was the driving case; handover 2026-11-08).
+`POST /api/users/{sub}/send` (user lane) or `POST /api/connections/{id}/send`
+(connection lane) carrying `{type, batch, batch_v:1}` with the original chunks
+verbatim — one rate-limit unit per flush instead of one per chunk (the
+AI-reasoning token lane was the driving case; handover 2026-11-08). The
+semantics are pinned by parity test suites: PC-1…PC-8 gates in
+`clients/dotnet/tests/Ar.Realtime.Client.Tests/CoalescedSendTests.cs` and
+`clients/python/tests/test_coalescing.py` (non-blocking offer, single-flight,
+ordering, once-only error propagation at drain/complete, 429 one-retry policy,
+drop-oldest budget, wire shape, per-tab connection lane).
 
 ## 5 · Configuration
 

@@ -33,24 +33,28 @@ public interface ICoalescedSendHandle : IAsyncDisposable
 }
 
 /// <summary>
-/// Single-flight coalescing on the unicast lane (handover §3): at most ONE
-/// <c>POST /api/users/{sub}/send</c> outstanding per handle. The sequential
-/// consumer loop below IS the ordering guarantee — request N+1 is never sent
-/// before N's response, so a retried batch can never reorder. Chunks offered
-/// while a request is in flight ride the NEXT flush; the flush fires the
-/// instant the response lands, so batch size self-tunes to
-/// generation_rate × RTT with no timers involved.
+/// Single-flight coalescing on either send lane (handover §3): at most ONE
+/// publish outstanding per handle. The sequential consumer loop below IS the
+/// ordering guarantee — request N+1 is never sent before N's response, so a
+/// retried batch can never reorder. Chunks offered while a request is in
+/// flight ride the NEXT flush; the flush fires the instant the response
+/// lands, so batch size self-tunes to generation_rate × RTT with no timers.
 ///
-/// Wire shape (parity with python's coalescing.py): one request per flush
-/// carrying the whole batch — <c>{ "type": streamType, "batch": [chunk…],
-/// "batch_v": 1 }</c>.
+/// Lanes (parity with python): <c>user</c> → user_channel|{sub} fan-out;
+/// <c>connection</c> → ONE socket (per-TAB reasoning streams — each tab
+/// subscribes a distinct stream). The connection lane is partition-scoped
+/// server-side: unknown/foreign ids surface as the non-429 drop path.
+///
+/// Wire shape (CONTRACT §3.1): one request per flush carrying the whole
+/// batch — <c>{ "type": streamType, "batch": [chunk…], "batch_v": 1 }</c>.
 /// </summary>
 public sealed class CoalescedSendHandle : ICoalescedSendHandle
 {
     private const int BatchV = 1;
 
     private readonly RealtimePublisher _publisher;
-    private readonly string _userSub;
+    private readonly string _target;
+    private readonly bool _connectionLane;                 // user (user_channel|sub) vs connection (ONE socket)
     private readonly int _maxPendingChars;
 
     private readonly object _lock = new();
@@ -66,14 +70,17 @@ public sealed class CoalescedSendHandle : ICoalescedSendHandle
     private readonly TaskCompletionSource _workerDone =
         new(TaskCreationOptions.RunContinuationsAsynchronously);
 
-    public CoalescedSendHandle(RealtimePublisher publisher, string userSub, CoalesceOptions? options = null)
+    public CoalescedSendHandle(RealtimePublisher publisher, bool connectionLane, string target, CoalesceOptions? options = null)
     {
         _publisher = publisher ?? throw new ArgumentNullException(nameof(publisher));
-        if (string.IsNullOrWhiteSpace(userSub))
-            throw new RealtimeValidationException("user_id is required");
+        if (string.IsNullOrWhiteSpace(target))
+            throw new RealtimeValidationException(connectionLane
+                ? "user_id is required for the connection lane: connection_id is required"
+                : "user_id is required");
         if (((options ?? new CoalesceOptions()).MaxPendingChars) < 1)
             throw new RealtimeValidationException("MaxPendingChars must be positive");
-        _userSub = userSub;
+        _target = target;
+        _connectionLane = connectionLane;
         _maxPendingChars = (options ?? new CoalesceOptions()).MaxPendingChars;
 
         // dedicated long-running worker: a single publisher lane owns the flushes
@@ -185,7 +192,10 @@ public sealed class CoalescedSendHandle : ICoalescedSendHandle
         async Task Send()
         {
             var wire = (JsonObject)JsonNode.Parse(envelope.ToJsonString())!;
-            await _publisher.SendToUserAsync(_userSub, wire).ConfigureAwait(false);
+            if (_connectionLane)
+                await _publisher.SendToConnectionAsync(_target, wire).ConfigureAwait(false);
+            else
+                await _publisher.SendToUserAsync(_target, wire).ConfigureAwait(false);
         }
 
         try

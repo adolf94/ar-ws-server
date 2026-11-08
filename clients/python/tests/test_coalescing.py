@@ -99,8 +99,23 @@ def make_stub(state: StubState) -> RealtimePublisher:
             length = int(self.headers.get("Content-Length", "0"))
             body = json.loads(self.rfile.read(length) or b"{}")
             status = stub.next_status()
-            stub.record(body)
-            payload = json.dumps({"ok": True, "user_id": "u", "group": "g", "partition": "p"}).encode()
+            state.record(body)
+            # error-shaped envelopes for non-2xx — the real server's contract
+            # (docs/CONTRACT.md §2), which publisher._call maps onto codes
+            if status == 200:
+                payload = json.dumps({
+                    "ok": True, "user_id": "u", "group": "g", "partition": "p",
+                    "connection_id": "c", "connection_partition": "p",
+                }).encode()
+            else:
+                error_code = {
+                    404: "connection_not_found",
+                    403: "connection_not_in_partition",
+                }.get(status, "request_failed")
+                payload = json.dumps({
+                    "error": error_code,
+                    "detail": f"status {status}",
+                }).encode()
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
             if status == 429:
@@ -316,3 +331,57 @@ def test_offer_validates_type_eagerly_like_send_lanes():
         handle.offer("not even a dict")
     assert handle.drain().offered == 0
     assert state.envelopes == []                  # nothing ever hit the wire
+
+
+# ── PC-8: the connection lane (per-tab CoT streams) ──────────────────────────
+
+def test_pc8a_connection_lane_carries_order_and_envelope():
+    """PC-8a mirror of PC-3/PC-7 through POST /api/connections/{id}/send:
+    independent per-TAB stream — order + batch envelope identical to user lane."""
+    state = StubState()
+    publisher = make_stub(state)
+    handle = publisher.coalesced_send_to_connection("tab-1")
+    handle.offer(chunk("t1.1"))
+    handle.offer(chunk("t1.2"))
+    time.sleep(0.5)                               # flush #1: [t1.1, t1.2]
+    handle.offer(chunk("t1.3"))
+    stats = handle.drain()
+
+    assert stats.publishes == 2 and stats.flushed == 3 and stats.dropped == 0
+    assert texts(state) == [["t1.1", "t1.2"], ["t1.3"]]
+    first = state.envelopes[0]["data"]
+    assert first["type"] == "reclassifyThinking" and first["batch_v"] == 1
+
+
+def test_pc8b_connection_lane_dead_socket_drops_without_hang():
+    """PC-8b: 404 connection_not_found (tab closed before the flush lands) is a
+    NON-429 failure: same-batch-once retry must NOT happen — the batch drops,
+    the stream continues, drain propagates exactly once."""
+    state = StubState()
+    state.responses = [404, 200]                  # stream 1 dies; the next flush succeeds
+    publisher = make_stub(state)
+    handle = publisher.coalesced_send_to_connection("gone-tab")
+    handle.offer(chunk("c1"))
+    handle.offer(chunk("c2"))
+    time.sleep(0.3)                               # flush #1 fails 404 (NO retry — one attempt only)
+    handle.offer(chunk("survivor-1"))             # stream keeps going on the same handle
+
+    with pytest.raises(RealtimeApiError) as caught:
+        handle.drain()
+    assert caught.value.status == 404
+    assert caught.value.code == "connection_not_found"
+
+    stats = handle.drain()
+    assert stats.publishes == 1 and stats.flushed == 1 and stats.dropped == 2
+    # one wire attempt per flush — no same-batch retry on 404
+    assert texts(state) == [["c1", "c2"], ["survivor-1"]]
+
+
+def test_pc8c_connection_lane_rejects_bad_targets_eagerly():
+    state = StubState()
+    publisher = make_stub(state)
+    with pytest.raises(RealtimeValidationError):
+        publisher.coalesced_send_to_connection("")          # the lane validation is eager
+    with pytest.raises(RealtimeValidationError):
+        publisher.coalesced_send_to_connection("   ")
+    assert state.envelopes == []

@@ -1,6 +1,6 @@
 [project]
 name = "ar-realtime-client"
-version = "0.1.1"
+version = "0.1.2"
 description = "Publisher client for the realtime microservice (HTTP server API — publish/broadcast/unicast/group ops, Cloudflare-safe User-Agent). Contract: realtime docs/CONTRACT.md v1."
 readme = "README.md"
 requires-python = ">=3.10"

@@ -77,7 +77,17 @@ public sealed class RealtimePublisher : IRealtimePublisher, IAsyncDisposable
     /// propagates the last error. Parity with python <c>coalesced_send_to_user</c>.
     /// </summary>
     public ICoalescedSendHandle CoalescedSendToUser(string userSub, CoalesceOptions? options = null)
-        => new CoalescedSendHandle(this, userSub, options);
+        => new CoalescedSendHandle(this, connectionLane: false, userSub, options);
+
+    /// <summary>
+    /// Single-flight coalesced stream to ONE socket — the per-TAB lane (each
+    /// tab subscribes its own reasoning stream; identical semantics to the user
+    /// lane). Closed/foreign connection ids surface as the non-429 drop path
+    /// (404/403) — the batch drops, the stream continues,
+    /// <see cref="ICoalescedSendHandle.CompleteAsync"/> raises it once.
+    /// </summary>
+    public ICoalescedSendHandle CoalescedSendToConnection(string connectionId, CoalesceOptions? options = null)
+        => new CoalescedSendHandle(this, connectionLane: true, connectionId, options);
 
     public async Task<SendResult> SendToConnectionAsync(string connectionId, JsonObject data, CancellationToken ct = default)
     {

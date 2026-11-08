@@ -170,7 +170,9 @@ publish.
   Server fix surfaced by the suite: `GroupRegistry.Create` always returned
   `created=true` (`GetOrAdd` bool never captured). 8/8.
 - [x] `clients/python` — `ar-realtime-client` (uv project, httpx), version
-  **0.1.1**: publisher mirrors dotnet; fix `6542156` —
+  **0.1.2** (0.1.2 bump uncommitted in the tree at HEAD `ebbcfbc`; 0.1.1 =
+  token-provider fix + hardening `6542156`): publisher
+  mirrors dotnet; fix `6542156` —
   `RealtimePublisherOptions` NameErrored on plain-callable token providers
   in the 0.1.0 wheel (`CallableTokenProvider` not imported in
   publisher.py); hardening: garbage raw dict/str providers now raise
@@ -178,7 +180,7 @@ publish.
   dicts → garbage bearer). `ArAuthTokenProvider` (ar_auth-coupled) accepts
   any client_credentials-shaped object (lazy); pypi `ar-auth-client` does
   NOT exist → the sibling SDK is an editable-install/factory decision for
-  the consumer, never a hard dep. Suite 19/19.
+  the consumer, never a hard dep. Suite 22/22.
 - [x] Coalesced streaming — single-flight unicast sending in BOTH
   publishers, so AI reasoning-stream producers (bounded by publish RTT, not
   model speed; a 429 silently drops chunks) batchify without
@@ -198,6 +200,18 @@ publish.
     OLDEST pending chunks (freshest reasoning wins); worker try/finally
     guarantees `drain()` never hangs on a dead lane. Live gate: 500 real
     chunks through the 600/60s lane.
+  * Per-TAB lane (both SDKs, same handle — shipped in the tree, uncommitted
+    at HEAD `ebbcfbc`): `coalesced_send_to_connection(id)`
+    / `CoalescedSendToConnection(id, CoalesceOptions?)` (+ `IRealtimePublisher`
+    member) — `POST /api/connections/{id}/send`, identical envelope +
+    semantics; SEPARATE handles per TAB keep independent single-flight windows
+    and orderings (TAB 1 vs TAB 2 CoT streams never share a flight). Closed or
+    foreign ids surface as the NON-429 drop path (404 `connection_not_found`
+    / 403 `connection_not_in_partition`): batch drops, counted, stream
+    continues, drain raises the last error once — no same-batch retry on
+    non-429 (gated). Discovery is producer-architecture: the SPA knows its
+    own connection id and passes it at job start (out of client scope);
+    multi-tab rate budget vs the 600/60s window is owner-managed.
   * dotnet: API parity — `IRealtimePublisher.CoalescedSendToUser(sub,
     CoalesceOptions?)` → `ICoalescedSendHandle`
     (`Offer`/`CompleteAsync`/`Snapshot`, `CoalesceStats` record, identical
@@ -210,21 +224,30 @@ publish.
 - [x] Harness: `bash dev/test-clients.sh [ts|dotnet|python]` — boots the
   mock lane, then runs each lib's suite against it (self-skipping tests
   stay green without a stack).
+- [x] Client publish pipelines (CI, per commit `b55fa88`):
+  `.github/workflows/publish-clients-{npm,dotnet,python}.yml` — manual
+  dispatch; npm/dotnet → GitHub Packages, python → GitHub Releases; all
+  three green (dotnet `42378560729`, npm `42378389739`,
+  python `42377950688`). Dotnet publishes via the generated `github` NuGet
+  source (`c0325f5`); npm uses `npm install` (lockfile is gitignored,
+  `6eefb54`, `0a01a05`).
 - **Known gap (candidate follow-up, NOT fixed)**: bare `dotnet test` (no
   `SRV`) NREs in PublisherConformanceTests — the file comment claims
   "self-skips" but an xunit `IAsyncLifetime.InitializeAsync` early-return
   does NOT skip; suites are green via `dev/test-clients.sh` / `SRV`-gated
   runs (python relies on pytest.skip).
-- [ ] **Open: INTEGRATION.md rewrite** against the frozen v1 contract
-  (nucleus written; pending while owner doc condensation was in flight — a
-  client-libraries pointer landed in README instead).
+- [x] INTEGRATION.md rewrite — done: `docs/INTEGRATION.md` is now the full
+  developer integration guide (negotiate/WS flows, token lifetimes, publish
+  envelopes, group/rate-limit recipes; cross-refs CONTRACT/TECH), rewritten
+  at `1a93f93` and condensed at `ebbcfbc`.
 
 ### Phase 5 — deploy compose + Caddy single route; decommission the wall
 
 - [x] `deploy/docker-compose.yml` — prod/gh_webhooks target mirroring the
-  wall's deploy shape: `IMAGE=<sha>` required, NO host ports, explicit env
-  map, healthcheck, internal `realtime` net + external `proxy` net (central
-  Caddy).
+  wall's deploy shape: `IMAGE` defaults to
+  `ghcr.io/adolf94/realtime:latest` (CI pins `sha-<short7>` tags and the
+  deploy POSTs them), NO host ports, explicit env map, healthcheck,
+  internal `realtime` net + external `proxy` net (central Caddy).
 - [x] `deploy/caddy-route.caddy` — ONE public prefix (`/realtime-v2`,
   plan §7.4) preserving the service's canonical paths: single `handle_path`
   strip + explicit deny for `/metrics`, `/openapi`, `/healthz` (ops door
@@ -251,8 +274,9 @@ publish.
   stays `ar-ws-server`. csproj pins: **Ar.Auth.OpenId 1.2.1**
   (server + dotnet client; `local-nuget` carries the nupkg — upstream
   `ar-oauth2`'s `publish-dotnet-client.yml` publishes it).
-- [ ] **Open (owner-side, NOT mine to run) — first green CI run needs**:
-  1. GitHub Packages: grant `adolf94/ar-ws-server` read access on the
+- [x] **First green runs happened (verified via `gh run list`) — the
+  owner-side prerequisites below are satisfied**:
+  1. GitHub Packages: `adolf94/ar-ws-server` read access on the
      `Ar.Auth.OpenId` package (GITHUB_TOKEN of another repo cannot read it
      by default — the stage step's fail message says exactly this).
   2. Repo secrets: `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`,
@@ -262,9 +286,13 @@ publish.
      "image": "ghcr.io/adolf94/realtime"}`.
   4. Deploy host: `/srv/deploy/realtime/` = deploy/docker-compose.yml +
      `.env` (`CONN_TOKEN_SECRET`; optional `ALLOWED_ORIGINS`).
+  Evidence: deploy-gh-webhooks success on main at 2026-11-08 (run
+  `42448393894`, commit `ebbcfbc`); GHCR aliases resolve on
+  `ghcr.io/adolf94/realtime:{sha-*,latest}`.
 - [ ] Central-Caddy paste + wall decommission happen on the deploy host
-  (apis host). Demo SPA still rides `/websockets/*` → wall cutoff is an
-  owner decision after burn-in.
+  (apis host; NOT verifiable from this repo — open until owner confirms).
+  Demo SPA still rides `/websockets/*` → wall cutoff is an owner decision
+  after burn-in.
 
 ---
 

@@ -1,7 +1,14 @@
-"""Coalesced send-to-user — single-flight publish coalescing (handover §3).
+"""Coalesced send lanes — single-flight publish coalescing (handover §3).
 
-One handle owns ONE stream to `user_channel|{sub}` and, on the wire, AT MOST
-ONE outstanding `POST /api/users/{sub}/send` at any moment:
+Two wire lanes, ONE semantics (parity python/dotnet):
+
+  * user lane        `send_to_user(sub)`        — user_channel|{sub} (cross-service)
+  * connection lane  `send_to_connection(id)`   — ONE socket: per-TAB AI CoT streams
+                                                   where each tab subscribes a
+                                                   distinct reasoning stream
+
+One handle owns ONE stream on ONE lane and, on the wire, AT MOST ONE
+outstanding publish at any moment:
 
   * `offer()` never touches HTTP — lock + append + return (≤1 ms-class),
     so the producer hot path (model emitting chunks) is never gated by RTT;
@@ -50,21 +57,28 @@ class CoalesceStats:
 
 
 class CoalescedSendHandle:
-    """Single-flight coalescer for one `user_channel|{sub}` stream."""
+    """Single-flight coalescer for one stream on one send lane."""
 
     def __init__(
         self,
         publisher: "RealtimePublisher",   # type: ignore[name-defined]  # noqa: F821
-        user_sub: str,
+        lane: str,                        # "user" | "connection"
+        target: str,                      # the user sub or the connection id
+        *,
         max_pending_chars: int = DEFAULT_MAX_PENDING_CHARS,
     ) -> None:
-        if not isinstance(user_sub, str) or not user_sub.strip():
-            raise RealtimeValidationError("user_sub is required")
+        if lane not in ("user", "connection"):
+            raise RealtimeValidationError(f"unknown coalesce lane {lane!r}")
+        if not isinstance(target, str) or not target.strip():
+            raise RealtimeValidationError(
+                "target is required (user sub or connection id)"
+            )
         if max_pending_chars < 1:
             raise RealtimeValidationError("max_pending_chars must be positive")
 
         self._publisher = publisher
-        self._user_sub = user_sub
+        self._lane = lane
+        self._target = target
         self._max_pending_chars = max_pending_chars
 
         self._cond = threading.Condition()
@@ -166,7 +180,10 @@ class CoalescedSendHandle:
         attempt = 0
         while True:
             try:
-                self._publisher.send_to_user(self._user_sub, envelope)
+                if self._lane == "connection":
+                    self._publisher.send_to_connection(self._target, envelope)
+                else:
+                    self._publisher.send_to_user(self._target, envelope)
             except RealtimeApiError as error:
                 if error.status == 429 and attempt == 0:
                     # wait out the window and re-send the SAME batch once

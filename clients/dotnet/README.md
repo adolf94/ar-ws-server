@@ -49,7 +49,7 @@ var result = await realtime.PublishAsync("approvals", new JsonObject
 
 ## Coalesced Streaming (single-flight publishes)
 
-The unicast reasoning lane can batch on its own: `Offer()` is validate+enqueue
+Both send lanes can batch on their own: `Offer()` is validate+enqueue
 only, and the next flush fires the instant the in-flight response lands — batch
 size self-tunes to `generation_rate × RTT`, ordering guaranteed (request N+1
 never sends before N's response). Parity with python `coalesced_send_to_user`:
@@ -61,11 +61,18 @@ foreach (var chunk in EnumerateModelStream())      // NEVER awaits HTTP
 // DisposeAsync → CompleteAsync: flushes the remainder, propagates the last error once
 ```
 
+Per-TAB CoT streams ride the **connection lane** the same way —
+`CoalescedSendToConnection(connectionId)` (identical semantics; independent
+single-flight windows per tab). A closed/foreign connection id surfaces as the
+non-429 drop path (404/403).
+
 Explicit form when you want the stats: `await chunks.CompleteAsync()` → throws
-the last `RealtimeApiException` of a failed batch (then re-serves idempotent
-`CoalesceStats` via `Snapshot()`). 429s honor `RetryAfterSeconds` and re-send
-the SAME batch once; the second 429 drops the batch (counted in `Dropped`) and
-the stream continues. Wire shape is CONTRACT §3.1: one request per flush
+the last batch failure once (typically `RealtimeApiException`; then re-serves
+idempotent `CoalesceStats` — `Offered`, `Flushed`, `Dropped`, `Publishes`,
+`LastError` — via `Snapshot()`). 429s honor `RetryAfterSeconds` and re-send
+the SAME batch once; any second failure drops the batch (counted in
+`Dropped`) and the stream continues. A non-429 failure — or a 429 that lacks
+`Retry-After` — drops immediately without retry. Wire shape is CONTRACT §3.1: one request per flush
 carrying `{type, batch, batch_v: 1}`.
 `CoalescedSendToUser(userSub, new CoalesceOptions { MaxPendingChars = 64_000 })`
 bounds queued-but-unflushed memory by shedding the OLDEST chunks — freshest

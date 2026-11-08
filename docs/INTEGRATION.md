@@ -141,7 +141,7 @@ All write requests require: `Authorization: Bearer <IdP token>` with the publish
 ### 4.3 · Event Envelopes
 
 * Set payload type in `data.type`. The server automatically stamps `from` (caller `client_id`) and `sent_at` (RFC 3339 UTC).
-* Coalesced flushes (publisher SDKs, §4.4) ride one envelope with a `batch` array — CONTRACT §3.1: `{ "type": <stream type>, "batch": [chunk…verbatim], "batch_v": 1 }`. The server treats it as ONE event: one stamp, one rate-limit unit, one history row.
+* Coalesced flushes (publisher SDKs, §4.4) ride one envelope with a `batch` array — CONTRACT §3.1: `{ "type": <stream type>, "batch": [chunk…verbatim], "batch_v": 1 }`. The outer `type` is pinned from the handle's first chunk. The server treats it as ONE event: one stamp, one rate-limit unit, one history row.
 * Standard errors: `400` (validation), `401` (invalid token), `403` (missing scope or wrong partition), `404` (unknown group or socket).
 * Publishing to an unknown or empty group succeeds with `200 ok` and delivers to zero subscribers.
 
@@ -153,7 +153,15 @@ Rate limits use a fixed window per `client_id` (`RATE_WINDOW_SECONDS`, default 6
 
 When tripped:
 * Returns `429 { "error": "rate_limited", "detail": "…" }` with a `Retry-After` header indicating seconds until reset.
-* **For streaming workloads, use the publisher SDKs' coalesced send** rather than hand-rolled batching: `RealtimePublisher.coalesced_send_to_user(sub)` (`ar-realtime-client` — clients/python) and `RealtimePublisher.CoalescedSendToUser(sub)` (`Ar.Realtime.Client` — clients/dotnet). `offer()` / `Offer()` never blocks the hot path; batches self-tune to `generation_rate × RTT` (one in-flight publish per stream, strict ordering); on 429 the SDK honors `Retry-After` and re-sends the same batch once, then drops the batch and continues — see CONTRACT §3.1 for the wire shape.
+* **For streaming workloads, use the publisher SDKs' coalesced send** rather than hand-rolled batching (semantics identical in both SDKs):
+  * python (`ar-realtime-client`, clients/python): `RealtimePublisher.coalesced_send_to_user(sub)` or `coalesced_send_to_connection(id)`, keyword `max_pending_chars=64_000` → `CoalescedSendHandle`.
+  * .NET (`Ar.Realtime.Client`, clients/dotnet): `CoalescedSendToUser(sub, CoalesceOptions?)` or `CoalescedSendToConnection(id, CoalesceOptions?)`, `CoalesceOptions.MaxPendingChars = 64_000` → `ICoalescedSendHandle`.
+  * `offer()` / `Offer()` is validate + enqueue only — never blocks the producer hot path (validated against CONTRACT §3: `data.type` must be a string).
+  * Single-flight: at most ONE in-flight publish per handle; chunks offered while a request is in flight ride the NEXT flush, which fires the instant the response lands — batches self-tune to `generation_rate × RTT`, offer order is strictly preserved.
+  * Memory bound (`max_pending_chars` / `MaxPendingChars`): the budget counts queued-but-unflushed chunk chars; on overflow the OLDEST pending chunks are shed (freshest reasoning wins; the newest survives even if it alone exceeds the budget). The in-flight batch is already detached and is never shed.
+  * On 429: honor `Retry-After` and re-send the SAME batch once; a second 429 (or any other failure — e.g. `404 connection_not_found` on the connection lane when a tab closed) drops that batch, records it in stats, and the stream continues. Caveat: python sleeps `Retry-After` seconds, defaulting to 60 s when the header is absent (`coalescing.py` 429 handler); .NET only retries when a positive `Retry-After` was returned (`MapFailure` in `RealtimePublisher.cs`), otherwise it drops immediately.
+  * Stream end: `drain()` / `CompleteAsync()` flush the remainder, propagate the last failed batch exactly once, then keep serving stats idempotently; `offer()` rejects afterwards — open a new handle per stream. Running counters: `stats()` / `Snapshot()` → `CoalesceStats(offered, flushed, dropped, publishes, last_error)`.
+  * Wire shape: CONTRACT §3.1.
 
 ### 4.5 · CORS & Origin Restrictions
 

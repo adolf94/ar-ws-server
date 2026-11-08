@@ -106,7 +106,21 @@ class RealtimePublisher:
         token lane. offer() is lock+append only; batches self-tune to
         generation_rate × RTT; drain() propagates the last error. See
         coalescing.py (handover §3: one in-flight publish per handle, always)."""
-        return CoalescedSendHandle(self, user_sub, max_pending_chars=max_pending_chars)
+        return CoalescedSendHandle(self, "user", user_sub, max_pending_chars=max_pending_chars)
+
+    def coalesced_send_to_connection(
+        self,
+        connection_id: str,
+        *,
+        max_pending_chars: int = DEFAULT_MAX_PENDING_CHARS,
+    ) -> CoalescedSendHandle:
+        """Single-flight coalesced stream to ONE socket — the per-TAB lane
+        (each tab subscribes its own reasoning stream; identical semantics to
+        the user lane: offer lock+append only, batches self-tune to
+        generation_rate × RTT, drain() propagates the last error). A closed or
+        foreign connection surfaces as the non-429 drop path (404/403) — the
+        batch drops, the stream continues, drain() raises it once."""
+        return CoalescedSendHandle(self, "connection", connection_id, max_pending_chars=max_pending_chars)
 
     def send_to_connection(self, connection_id: str, data: dict[str, Any]) -> SendResult:
         body = self._call("POST", f"/api/connections/{quote(str(connection_id), safe='')}/send",

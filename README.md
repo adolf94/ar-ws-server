@@ -17,11 +17,13 @@ Replaces the former Centrifugo + proxy-wall stack; design + owner decisions:
 * **`TODO.md`** — live status: what's done, in progress, next up.
 * **Client libraries** (`clients/`): TypeScript consumer
   (`@adolf94/realtime-client` — hub subscription, Cloudflare-safe UA) ·
-  .NET publisher (`Ar.Realtime.Client` — local NuGet feed) ·
-  Python publisher (`ar-realtime-client`). Both publishers ship **coalesced
-  streaming** — single-flight unicast sending with self-tuning batches and
-  429 retry handling (CONTRACT §3.1) — so AI reasoning-stream producers
-  batchify instead of stalling on RTT.
+  .NET publisher (`Ar.Realtime.Client`) ·
+  Python publisher (`ar-realtime-client`). All three publish via CI
+  (npm/dotnet → GitHub Packages, python → GitHub Releases); the .NET
+  package also rebuilds locally against the local NuGet feed.
+  Both publishers ship **coalesced streaming** — single-flight unicast
+  sending with self-tuning batches and 429 retry handling (CONTRACT §3.1)
+  — so AI reasoning-stream producers batchify instead of stalling on RTT.
   Conformance: `bash dev/test-clients.sh [ts|dotnet|python]`.
 * Run the spike: `bash dev/run-spike.sh` (real IdP; e2e creds sourced from
   `../centrifugo/.env`, never printed). See `docs/TECH.md` §6 for details.

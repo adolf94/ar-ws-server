@@ -26,6 +26,9 @@ public interface IRealtimePublisher
     /// </summary>
     ICoalescedSendHandle CoalescedSendToUser(string userSub, CoalesceOptions? options = null);
 
+    /// <summary>Coalesced handle on the per-socket lane — per-TAB streams (same semantics; lane pool-scoped per connection id).</summary>
+    ICoalescedSendHandle CoalescedSendToConnection(string connectionId, CoalesceOptions? options = null);
+
     /// <summary>POST /api/connections/{id}/send — partition-scoped (404 unknown / 403 foreign).</summary>
     Task<SendResult> SendToConnectionAsync(string connectionId, JsonObject data, CancellationToken ct = default);
 
