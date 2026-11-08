@@ -13,7 +13,11 @@ import { type RealtimeEvent, RealtimeHubError } from "./events.ts";
  * must be able to hand a FRESH IdP token each time.
  */
 export interface RealtimeHubOptions {
-  /** hub path, e.g. "https://realtime.example.com/realtime/hub" (WS-only upstream) */
+  /** hub path, e.g. "https://realtime.example.com/realtime/hub" (WS-only
+   * upstream). Append `?instance=<stable-tag>` (a UUID kept in
+   * localStorage / process env) to get a reconnect-stable logical
+   * connection_id minted by the server (CONTRACT §2.2) — otherwise the id
+   * is per-socket and changes on every reconnect. */
   url: string;
   /**
    * Returns an IdP access token; re-invoked by the SDK on every (re)connect.
@@ -31,11 +35,12 @@ export interface RealtimeHubOptions {
    */
   reconnectIntervals?: number[] | false;
   /**
-   * Fires after an auto-reconnect succeeds with the NEW server-assigned
-   * connection id (every reconnect re-negotiates, so the id changes —
-   * docs/CONTRACT.md). Roughly state `connecting` -> `connected`.
-   * The FIRST successful start() does not fire this (read
-   * `connectionId` after `await start()` instead).
+   * Fires after an auto-reconnect succeeds with the server-minted logical
+   * connection_id (stable across reconnects for a tagged `?instance=`;
+   * freshly minted per socket otherwise — CONTRACT §2.2). Roughly state
+   * `connecting` -> `connected`. The FIRST successful start() does not
+   * fire this (read `connectionId` after `await start()` instead — the
+   * connection_registered envelope has landed by then).
    */
   onReconnected?: (connectionId: string | null) => void;
   logLevel?: LogLevel;
@@ -47,6 +52,12 @@ export interface RealtimeHubDisposable {
 
 export class RealtimeHubClient {
   private connection: HubConnection | null = null;
+  /** server-minted logical id (CONTRACT §2.2/§5) — captured from the
+   * connection_registered envelope; null until the envelope lands. */
+  private logicalId: string | null = null;
+  /** set when a reconnect begins; cleared once the fresh
+   * connection_registered envelope lands → onReconnected fires exactly once */
+  private awaitingReconnectedId = false;
   private readonly handlers = new Map<string, Set<(event: RealtimeEvent) => unknown>>();
   private catchAll: ((event: RealtimeEvent) => unknown) | null = null;
 
@@ -78,15 +89,15 @@ export class RealtimeHubClient {
   }
 
   /**
-   * Server-assigned connection id (docs/CONTRACT.md) — the same id other
-   * services address with POST /api/connections/{id}/send and
-   * disconnect-by-id. Set after negotiate succeeds; null until connected.
-   * Changes on EVERY reconnect (each reconnect re-negotiates), so re-read
-   * it — the `onReconnected` hook hands you the fresh one.
+   * Server-minted logical connection id (CONTRACT §2.2) — the address other
+   * services use for `POST /api/connections/{id}/send` and disconnect-by-id.
+   * Set once the connection_registered envelope lands after connect; null
+   * until then. UNLIKE the underlying socket id it survives reconnects —
+   * same instance tag, same id (supply `?instance=<tag>` in the hub url to
+   * opt in; untagged sockets get a fresh per-socket id each reconnect).
    */
   public get connectionId(): string | null {
-    // SignalR HubConnection exposes this after negotiate; null pre-connect
-    return this.connection?.connectionId ?? null;
+    return this.logicalId;
   }
 
   public async start(): Promise<void> {
@@ -114,10 +125,12 @@ export class RealtimeHubClient {
       .configureLogging(this.options.logLevel ?? LogLevel.Error)
       .build();
     connection.on("event", (envelope: unknown) => this.dispatch(envelope));
-    connection.onreconnecting((err) =>
-      console.warn("realtime-client: reconnecting after", err?.message ?? String(err)));
-    connection.onreconnected((connectionId) =>
-      this.options.onReconnected?.(connectionId ?? null));
+    connection.onreconnecting((err) => {
+      // the minted id may change on reconnect (untagged) or stay (tagged) —
+      // deliver the FRESH one when the connection_registered envelope lands
+      this.awaitingReconnectedId = true;
+      console.warn("realtime-client: reconnecting after", err?.message ?? String(err));
+    });
     this.connection = connection;
     await connection.start();
   }
@@ -143,6 +156,15 @@ export class RealtimeHubClient {
   private dispatch(raw: unknown): void {
     const envelope = this.envelope(raw);
     if (!envelope) return; // receivers ignore unknown/no-type frames (contract §3)
+
+    if (envelope.type === "connection_registered" && typeof (envelope as Record<string, unknown>)["connection_id"] === "string") {
+      // server mint/bind notification (CONTRACT §5) — capture the logical id
+      this.logicalId = (envelope as Record<string, unknown>)["connection_id"] as string;
+      if (this.awaitingReconnectedId) {
+        this.awaitingReconnectedId = false;
+        this.options.onReconnected?.(this.logicalId);
+      }
+    }
 
     this.catchAll?.(envelope);
     const set = this.handlers.get(envelope.type);

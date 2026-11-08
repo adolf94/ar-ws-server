@@ -148,13 +148,24 @@ connection.on('event', (data) => { received = data; });
 
 try {
   await connection.start();
-  check('WS-2. hub handshake consumed the negotiate-issued token', true, `connectionId=${connection.connectionId}`);
+  check('WS-2. hub handshake consumed the negotiate-issued token', true, `socket=${connection.connectionId}`);
 } catch (err) {
   check('WS-2. hub handshake consumed the negotiate-issued token', false, String(err));
   console.log('\n→ if this is "unable to connect": the JS client may not honor the negotiate accessToken (shape (a)); try shape (b) — see PLAN-OWN-SERVER.md §5.2');
   await connection.stop().catch(() => {});
   process.exit(1);
 }
+
+// ── v1.1 addressing: the server-minted, reconnect-stable connection_id ──────
+// delivered as the first envelope on THIS socket (hub has no invocable
+// methods — CONTRACT §1); the negotiate transport id above is socket_id and
+// is only ever a server-internal detail now.
+await sleep(600);
+check('CONN-1. connection_registered envelope → server-minted UUIDv7 id',
+  received?.type === 'connection_registered' && typeof received?.connection_id === 'string'
+    && received.connection_id.includes('-') && received.socket_id === connection.connectionId,
+  `received=${JSON.stringify(received)}`);
+const logicalId = received?.connection_id;   // addressable from here on
 
 // ── groups: POST /api/groups + member add (Phase 1, owner spec) ─────────────
 const authHdrs = { Authorization: `Bearer ${idpToken}`, 'Content-Type': 'application/json' };
@@ -191,19 +202,52 @@ if (MODE === 'mock') {
     `received=${JSON.stringify(received)}`);
 }
 
-// ── send to a specific CONNECTION (scoped per owner, 2026-11-07) ────────────
-// One live socket: ours (connected above). Own-socket send must deliver.
+// ── send to a specific CONNECTION (scoped per owner, 2026-11-07; v1.1) ──────
+// Address = the logical connection_id from CONN-1 (fans to its live sockets).
 received = null;
-const connSendRes = await fetch(`${BASE}/api/connections/${encodeURIComponent(connection.connectionId)}/send`, {
+const connSendRes = await fetch(`${BASE}/api/connections/${encodeURIComponent(logicalId)}/send`, {
   method: 'POST', headers: authHdrs,
   body: JSON.stringify({ data: { type: 'notify_receive', message_id: 'snd-5', text: 'direct to this socket' } }),
 });
 const connSendBody = await connSendRes.json().catch(() => ({}));
 check('SEND-5. own-connection send → 200 ok', connSendRes.status === 200 && connSendBody.ok === true,
-  `status=${connSendRes.status} conn=${connection.connectionId?.slice(0, 8)}…`);
+  `status=${connSendRes.status} conn=${String(logicalId).slice(0, 8)}…`);
 await sleep(800);
-check('SEND-6. per-socket delivery received', received?.message_id === 'snd-5',
+check('SEND-6. per-connection delivery received', received?.message_id === 'snd-5',
   `received=${JSON.stringify(received)}`);
+
+// ── v1.1 marquee: tagged instance survives reconnect + supersedes stale ─────
+// Same (sub, instance tag) reconnecting while the old socket is still up:
+// the NEW socket re-binds to the SAME id and the server aborts the old one.
+{
+  let taggedReceived = null;
+  const tagged = (name) => {
+    const c = new HubConnectionBuilder()
+      .withUrl(`${BASE}/realtime/hub?instance=${name}`, { accessTokenFactory: () => idpToken })
+      .build();
+    c.on('event', (d) => { taggedReceived = d; });
+    return c;
+  };
+  const taggedA = tagged('e2e-tag');
+  await taggedA.start();
+  taggedReceived = null;
+  await sleep(600);
+  const taggedId = taggedReceived?.connection_id;
+  check('CONN-2. tagged instance → own stable logical id',
+    typeof taggedId === 'string' && !!taggedId && taggedReceived?.instance_tagged === true,
+    `conn=${String(taggedId ?? '?').slice(0, 8)}… envelope=${JSON.stringify({ type: taggedReceived?.type, tagged: taggedReceived?.instance_tagged, superseded: taggedReceived?.superseded })}`);
+
+  // reconnect WITHOUT stopping A first → B supersedes A
+  taggedReceived = null;
+  const taggedB = tagged('e2e-tag');
+  await taggedB.start();
+  await sleep(900);
+  check('CONN-3. same tag reconnect re-binds to the SAME id (old socket superseded)',
+    taggedReceived?.connection_id === taggedId && taggedReceived?.superseded >= 1
+      && taggedA.state === 'Disconnected',
+    `same_id=${taggedReceived?.connection_id === taggedId} superseded=${taggedReceived?.superseded} A_state=${taggedA.state}`);
+  await taggedB.stop();
+}
 
 const ghostSend = await fetch(`${BASE}/api/connections/${encodeURIComponent('no-such-connection')}/send`, {
   method: 'POST', headers: authHdrs,
@@ -215,18 +259,24 @@ if (MODE === 'mock') {
   // foreign-partition socket: mint a second connection under a DIFFERENT
   // client_id, then send at it with OUR token — must be refused (caller
   // scoped to its own client_id).
+  // foreign-partition socket: mint a second connection under a DIFFERENT
+  // client_id, then send at its LOGICAL id with OUR token — must be refused
+  // (caller scoped to its own client_id).
   received = null;
   const foreignToken = await mintMock({ sub: '43', scope: PUBLISHER_SCOPE, client_id: 'other-service' });
+  let foreignEnvelope = null;
   const foreignConn = new HubConnectionBuilder()
     .withUrl(`${BASE}/realtime/hub`, { accessTokenFactory: () => foreignToken })
     .build();
+  foreignConn.on('event', (d) => { foreignEnvelope = d; });
   await foreignConn.start();
-  const foreignSend = await fetch(`${BASE}/api/connections/${encodeURIComponent(foreignConn.connectionId)}/send`, {
+  await sleep(600);   // envelope landing window
+  const foreignSend = await fetch(`${BASE}/api/connections/${encodeURIComponent(foreignEnvelope?.connection_id ?? '')}/send`, {
     method: 'POST', headers: authHdrs,   // our spa-demo-client token
     body: JSON.stringify({ data: { type: 'notify_receive', message_id: 'snd-6', text: 'must be refused' } }),
   });
   check('GATE-4b. send to another client_id\'s connection → 403 (caller scoped)',
-    foreignSend.status === 403, `status=${foreignSend.status}`);
+    foreignEnvelope?.connection_id != null && foreignSend.status === 403, `status=${foreignSend.status} foreign_conn=${String(foreignEnvelope?.connection_id ?? '?').slice(0, 8)}…`);
   await foreignConn.stop();
 }
 
@@ -432,27 +482,32 @@ check('P-1. presence: our identity online (stamps + closed world)',
   `status=${presRes.status} row=${JSON.stringify(ownRow)}`);
 
 if (MODE === 'mock') {
-  // foreign disconnect refused: our token cannot close another client's socket
+  // foreign disconnect refused: our token cannot close another client's
+  // connection — addressed by the foreign LOGICAL id (its envelope listener)
   const foreignDiscToken = await mintMock({ sub: '99', scope: PUBLISHER_SCOPE, client_id: 'other-service' });
+  let foreignDiscEnvelope = null;
   const foreignDiscConn = new HubConnectionBuilder()
     .withUrl(`${BASE}/realtime/hub`, { accessTokenFactory: () => foreignDiscToken })
     .build();
+  foreignDiscConn.on('event', (d) => { foreignDiscEnvelope = d; });
   await foreignDiscConn.start();
-  const foreignDiscRes = await fetch(`${BASE}/api/connections/${encodeURIComponent(foreignDiscConn.connectionId)}/disconnect`, {
+  await sleep(600);
+  const foreignDiscRes = await fetch(`${BASE}/api/connections/${encodeURIComponent(foreignDiscEnvelope?.connection_id ?? '')}/disconnect`, {
     method: 'POST', headers: authHdrs,   // our spa-demo-client token
   });
   check('D-1. disconnect of another client_id\'s connection → 403',
-    foreignDiscRes.status === 403, `status=${foreignDiscRes.status}`);
+    foreignDiscEnvelope?.connection_id != null && foreignDiscRes.status === 403,
+    `status=${foreignDiscRes.status} foreign_conn=${String(foreignDiscEnvelope?.connection_id ?? '?').slice(0, 8)}…`);
   await foreignDiscConn.stop();
 }
 
-// own disconnect: allowed, evicts the socket immediately
-const discRes = await fetch(`${BASE}/api/connections/${encodeURIComponent(connection.connectionId)}/disconnect`, {
+// own disconnect: allowed, evicts the connection immediately
+const discRes = await fetch(`${BASE}/api/connections/${encodeURIComponent(logicalId)}/disconnect`, {
   method: 'POST', headers: authHdrs,
 });
 const discBody = await discRes.json().catch(() => ({}));
 check('D-2. disconnect own connection → 200 ok', discRes.status === 200 && discBody.ok === true,
-  `status=${discRes.status}`);
+  `status=${discRes.status} aborted=${discBody.aborted}`);
 
 await sleep(800);
 check('D-3. connection actually closed', connection.state === 'Disconnected',

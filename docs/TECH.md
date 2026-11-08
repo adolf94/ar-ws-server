@@ -24,7 +24,7 @@ One process, one container, providing two distinct communication surfaces:
                      └───────────────────────────────────────────────────────────┘
 ```
 
-* **The bus**: A SignalR hub protected by an upfront security fence (§3). At connect time, the hub joins every connection to `user_channel|{sub}` (cross-service unicast address) and all persisted partition-scoped groups.
+* **The bus**: A SignalR hub protected by an upfront security fence (§3). At connect time the hub binds the socket to its logical `connection_id` (v1.1 addressing — see §2), supersedes any stale socket still bound to it, joins `user_channel|{sub}` (cross-service unicast address) and all persisted partition-scoped groups.
 * **The server API**: Minimal API invoking `IHubContext<RealtimeHub>` directly — zero external relays, returning standard HTTP status codes.
 * **Single secret**: The in-process symmetric key for signing connection tokens. App backends require no realtime server secrets.
 
@@ -52,6 +52,14 @@ Two authentication schemes by endpoint:
 * **Partition scoping**: The caller's `client_id` partitions groups and user identities via `GroupPartitioner`. A service manages only its own users and groups.
 * **Global unicast**: Cross-service user messaging (`POST /api/users/{sub}/send`) addresses `user_channel|{sub}`, delivering to all active connections for that `sub` across all services.
 
+### Connection Lifecycle (v1.1 addressing model, CONTRACT §2.2/§5)
+
+* Three addresses: `socket_id` (SignalR transport id, churns every reconnect, never addressable), logical **`connection_id`** (server-minted UUIDv7 via `Guid.CreateVersion7()`, stable per `client_id, sub, instance tag`), and `sub` via `user_channel|{sub}`.
+* `OnConnectedAsync` (`src/Realtime/Hubs/RealtimeHub.cs`) reads the `instance` tag off the WS upgrade request and binds via `IConnectionRegistry.Bind`: first sight mints the UUIDv7; the same tag on a reconnect re-binds to the SAME id and **supersedes** stale sockets still bound to it (aborted through `IConnectionAborts`), the count of successfully aborted stale sockets landing in the envelope's `superseded`. Untagged sockets get fresh per-socket ids (legacy one-socket semantics).
+* The id is delivered as a server-published envelope on the just-connected socket (the hub has ZERO invocable methods): `{type:"connection_registered", connection_id, socket_id, instance_tagged, superseded, from:"server", sent_at}`.
+* `InMemoryConnectionRegistry` (`src/Realtime/Connections/ConnectionRegistry.cs`) keeps two layers: per-socket presence (`_byUser`/`_bySocket` — membership, presence counts) and logical bindings (`_idByInstance`, `_byLogical`, `_logicalBySocket`). Tagged ids stay bound (boundless) after disconnect so reconnects re-bind; untagged ids die with their last socket. Persistence is deliberately absent: ids survive **client** reconnects, not server restarts.
+* The connection endpoints fan out over the logical id — send delivers to every bound socket (`delivered` = socket count; `404 connection_not_connected` when the id is known but boundless, `connection_not_found` when unknown), disconnect aborts ALL bound sockets (`aborted` = count). Partition scoping goes through `IConnectionRegistry.TryGetOwner` (403 foreign). Senders treat 404 as the cue to fall back to the user-channel lane.
+
 ## 3 · Security Fence (`Negotiate/SecurityFenceMiddleware.cs`)
 
 A single middleware placed after `UseAuthentication`:
@@ -78,12 +86,12 @@ A single middleware placed after `UseAuthentication`:
 | `src/Realtime/Auth/PrincipalExtensions.cs` | Helper extensions to extract `sub` and `client_id` claims. |
 | `src/Realtime/Auth/SubUserIdProvider.cs` | Maps connection principal to partitioned `Context.UserIdentifier`. |
 | `src/Realtime/Groups/GroupPartitions.cs` | Encodes and decodes physical `client_id|logical` keys for groups and users. |
-| `src/Realtime/Connections/ConnectionRegistry.cs` | In-memory registry tracking active connection IDs per user identity. |
+| `src/Realtime/Connections/ConnectionRegistry.cs` | Two-layer in-memory registry (v1.1): per-socket presence (`_byUser`/`_bySocket`) plus logical connections (`_idByInstance`/`_byLogical`) — `Bind` mints UUIDv7 ids per `(client_id, sub, instance tag)`, tagged ids re-bind across reconnects, `TryGetOwner` gives the partition check. Deliberately not persisted across restarts. |
 | `src/Realtime/Connections/GroupRegistry.cs` | In-memory registry tracking group metadata, history buffers, and memberships. |
 | `src/Realtime/Connections/ConnectionAborts.cs` | Tracks live `HubCallerContext` instances to support server-initiated disconnects. |
-| `src/Realtime/Hubs/RealtimeHub.cs` | SignalR hub: manages connect/disconnect lifecycle and re-applies group memberships. |
+| `src/Realtime/Hubs/RealtimeHub.cs` | SignalR hub: binds the logical `connection_id` on connect and supersedes stale sockets (v1.1), publishes the `connection_registered` envelope, re-applies group memberships + `user_channel`; zero invocable methods. |
 | `src/Realtime/Negotiate/SecurityFenceMiddleware.cs` | Negotiate token injection and WebSocket handshake validation. |
-| `src/Realtime/Api/RealtimeApiEndpoints.cs` | REST API routes for publish, broadcast, groups, members, presence, history, and disconnect. |
+| `src/Realtime/Api/RealtimeApiEndpoints.cs` | REST API routes for publish, broadcast, groups, members, presence, history, and disconnect; connection-scoped send/disconnect fan out over bound sockets with `delivered`/`aborted` counts (v1.1). |
 | `dev/mock-idp/server.js` | Standalone mock IdP server for offline local development and test automation. |
 | `dev/e2e/e2e.mjs` | End-to-end integration and security test suite. |
 | `dev/run-spike.sh` | Orchestration script to run server and E2E tests against real or mock IdP. |
@@ -143,7 +151,7 @@ bash dev/run-spike.sh
 IDP_MODE=mock bash dev/run-spike.sh
 ```
 
-The test suite validates negotiate token injection, WebSocket handshake authentication, publish/broadcast routing, group and membership persistence, history ring buffers, cross-service unicast isolation, 401/403 negative gates, and rate limiting.
+The test suite validates negotiate token injection, WebSocket handshake authentication, publish/broadcast routing, group and membership persistence, history ring buffers, cross-service unicast isolation, 401/403 negative gates, rate limiting, and the v1.1 connection lifecycle (CONN-1…CONN-3 in `dev/e2e/e2e.mjs`: mint envelope, tagged-instance stability, reconnect-same-id supersede).
 
 ## 7 · Public API Surface
 
@@ -157,8 +165,8 @@ The test suite validates negotiate token injection, WebSocket handshake authenti
 | `/api/publish` | `POST` | Bearer + Scope | Publish event to a single group. |
 | `/api/broadcast` | `POST` | Bearer + Scope | Publish event across multiple groups in partition. |
 | `/api/users/{sub}/send` | `POST` | Bearer + Scope | Global cross-service unicast send to a user. |
-| `/api/connections/{id}/send` | `POST` | Bearer + Scope | Unicast send to a specific connection within partition. |
-| `/api/connections/{id}/disconnect` | `POST` | Bearer + Scope | Forcibly close a connection within partition. |
+| `/api/connections/{id}/send` | `POST` | Bearer + Scope | Send to every socket bound to a logical `connection_id` within partition (v1.1; `delivered` count). |
+| `/api/connections/{id}/disconnect` | `POST` | Bearer + Scope | Force-close ALL sockets bound to a logical `connection_id` (v1.1; `aborted` count). |
 | `/api/groups` | `POST` | Bearer + Scope | Create or configure a group (idempotent). |
 | `/api/groups` | `GET` | Bearer | List groups, member counts, and online counts for caller's partition. |
 | `/api/groups/{g}/members` | `POST` | Bearer + Scope | Add user to group (immediate join + persisted). |
@@ -169,7 +177,7 @@ The test suite validates negotiate token injection, WebSocket handshake authenti
 
 ## 8 · Operational Characteristics & Constraints
 
-* **In-memory state**: Group registry, active connection mappings, and history buffers are held in memory. State is reset on process restart.
+* **In-memory state**: Group registry, active connection mappings, and history buffers are held in memory. State is reset on process restart; logical `connection_id`s minted per instance tag do not survive it (v1.1 — clients re-mint on their next connect and senders fall back to the user lane).
 * **Single-process scope**: Group and connection tracking operates within the local process instance.
 * **Rate limiting**: Fixed-window counters are maintained in memory per `client_id` partition.
 * **Metrics isolation**: `/metrics` is unauthenticated and unrate-limited to facilitate automated scraping; bind this endpoint to an internal network interface.

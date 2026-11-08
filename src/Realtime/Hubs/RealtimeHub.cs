@@ -22,6 +22,18 @@ public sealed class RealtimeHub(
         registry.Add(idKey, Context.ConnectionId);
         aborts.Track(Context.ConnectionId, Context);   // disconnect-by-id support (§5.3)
 
+        // ── logical connection bind (v1.1 addressing model, CONTRACT) ───
+        // A tagged instance (negotiate query `?instance=<stable tag>`)
+        // re-binds to the SAME server-minted UUIDv7 id on every reconnect;
+        // any stale socket still bound to it is superseded. Untagged
+        // sockets get a fresh per-socket id (legacy one-socket semantics).
+        var instanceTag = Context.GetHttpContext()?.Request.Query["instance"].ToString() ?? "";
+        var logicalId = registry.Bind(idKey, instanceTag, Context.ConnectionId);
+        var superseded = registry.SocketsFor(logicalId)
+            .Where(socket => socket != Context.ConnectionId)
+            .Select(stale => (stale, aborted: aborts.TryAbort(stale)))
+            .ToList();
+
         var principal = Context.User;
         var sub = principal?.GetSubject();
 
@@ -46,14 +58,33 @@ public sealed class RealtimeHub(
             joins.Add(Groups.AddToGroupAsync(Context.ConnectionId, partitioner.UserChannelKey(sub)));
         await Task.WhenAll(joins);
 
+        // ── id delivery: to the socket, not via invoke (§1: the hub has no
+        // client-invocable methods) — a server-published envelope on THIS
+        // connection hands over the logical id (and the connection-scoped
+        // send endpoints address it from here on).
+        await Clients.Client(Context.ConnectionId).SendAsync("event", new Dictionary<string, object?>
+        {
+            ["type"] = "connection_registered",
+            ["connection_id"] = logicalId,
+            ["socket_id"] = Context.ConnectionId,
+            ["instance_tagged"] = instanceTag.Length > 0,
+            ["superseded"] = superseded.Count(static s => s.aborted),
+            ["from"] = "server",
+            ["sent_at"] = DateTime.UtcNow.ToString("o"),
+        });
+
         logger.LogInformation(
-            "connected: user={User} connection={ConnectionId} partition={Partition} groups={Groups} user_channel={HasChannel}",
-            idKey, Context.ConnectionId, partitioner.PartitionOf(principal!), memberships.Count, sub is { Length: > 0 });
+            "connected: user={User} connection={ConnectionId} socket={SocketId} tagged={Tagged} superseded={Superseded} partition={Partition} groups={Groups} user_channel={HasChannel}",
+            idKey, logicalId, Context.ConnectionId, instanceTag.Length > 0, superseded.Count, partitioner.PartitionOf(principal!), memberships.Count, sub is { Length: > 0 });
     }
 
     public override Task OnDisconnectedAsync(Exception? exception)
     {
-        if (Context.UserIdentifier is { } user) registry.Remove(user, Context.ConnectionId);
+        if (Context.UserIdentifier is { } user)
+        {
+            registry.Remove(user, Context.ConnectionId);   // per-socket presence
+            registry.Unbind(user, Context.ConnectionId);   // logical bind
+        }
         aborts.Untrack(Context.ConnectionId);
         logger.LogInformation("disconnected: user={User} connection={ConnectionId} error={Error}",
             Context.UserIdentifier, Context.ConnectionId, exception?.Message);

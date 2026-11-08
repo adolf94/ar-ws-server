@@ -221,6 +221,21 @@ publish.
     attempt — JsonNode parenting made a reused retry envelope throw "node
     already has a parent" (python dict payload has no such graph).
   * Server touches: NONE (rate-limit math unchanged).
+- [x] v1.1 addressing model (CONTRACT §2.2/§5 — three addresses): `socket_id`
+  = SignalR transport id (per-socket, changes every reconnect, never
+  addressable); `connection_id` = server-minted UUIDv7, stable per
+  `(client_id, sub, instance tag)` across reconnects, dies on server restart;
+  `user_id` (sub) = user_channel. Opt-in via negotiate
+  `?instance=<client-generated stable tag>` (untagged = legacy fresh-per-
+  socket semantics). The id is delivered as a server-published envelope on
+  the socket: `{type:"connection_registered", connection_id, socket_id,
+  instance_tagged, superseded, from:"server", sent_at}`. Publisher SDKs
+  (`send_to_connection` / `SendToConnection(-)`) now take the LOGICAL id;
+  the response carries `delivered` (socket fan-out count); new 404
+  `connection_not_connected` (id known, zero live sockets) alongside
+  `connection_not_found` — senders treat connection 404 as the cue to fall
+  back to user-channel sends. Tests green: server spike 54/54 with new
+  gates CONN-1/2/3, ts conformance ALL PASS.
 - [x] Harness: `bash dev/test-clients.sh [ts|dotnet|python]` — boots the
   mock lane, then runs each lib's suite against it (self-skipping tests
   stay green without a stack).

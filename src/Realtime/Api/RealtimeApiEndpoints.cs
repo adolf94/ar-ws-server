@@ -189,8 +189,10 @@ public static class RealtimeApiEndpoints
                 return Results.Ok(new { ok = true, group, group_partition = partition, presence });
             });
 
-        // ── POST /api/connections/{id}/disconnect — force-close a socket
-        // (plan §5.3), the SAME partition scoping as send-to-connection:
+        // ── POST /api/connections/{id}/disconnect — force-close a logical
+        // connection (plan §5.3, v1.1: the id is the server-minted,
+        // reconnect-stable UUIDv7; every socket currently bound to it is
+        // aborted). The SAME partition scoping as send-to-connection:
         // 404 unknown, 403 foreign. Registry + aborts resolve the authority.
         endpoints.MapPost("/connections/{id}/disconnect",
             [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
@@ -200,7 +202,7 @@ public static class RealtimeApiEndpoints
                 if (string.IsNullOrWhiteSpace(id))
                     return Results.BadRequest(new { error = "connection_id_required", detail = "route connection id is required" });
 
-                if (!connections.TryGetUser(id, out var identityKey))
+                if (!connections.TryGetOwner(id, out var identityKey))
                     return Results.NotFound(new { error = "connection_not_found", detail = "no live connection with this id in this process" });
 
                 var partition = partitioner.PartitionOf(http.User);
@@ -209,7 +211,7 @@ public static class RealtimeApiEndpoints
                         new { error = "connection_not_in_partition", detail = "target connection belongs to another client_id partition" },
                         statusCode: StatusCodes.Status403Forbidden);
 
-                var aborted = aborts.TryAbort(id);
+                var aborted = connections.SocketsFor(id).Count(aborts.TryAbort);
                 return Results.Ok(new { ok = true, connection_id = id, connection_partition = partition, aborted });
             });
 
@@ -284,11 +286,14 @@ public static class RealtimeApiEndpoints
                 return Results.Ok(new { ok = true, user_id = sub });
             });
 
-        // ── POST /api/connections/{id}/send — per-socket send, PARTITION
-        // SCOPED (owner spec, 2026-11-07): the caller may only reach sockets
-        // whose connection identity lives inside its own client partition —
-        // 404 for unknown sockets, 403 for a foreign partition. This is the
-        // scoped counterpart of the global user_channel unicast above.
+        // ── POST /api/connections/{id}/send — per-connection send, PARTITION
+        // SCOPED (owner spec, 2026-11-07; v1.1: the id is the server-minted,
+        // reconnect-stable UUIDv7 — delivery fans to every socket currently
+        // bound to it). The caller may only reach connections whose identity
+        // lives inside its own client partition — 404 for unknown ids, 403
+        // for a foreign partition. This is the scoped counterpart of the
+        // global user_channel unicast above. Ephemeral: 404 means fall back
+        // to the user-channel lane.
         endpoints.MapPost("/connections/{id}/send",
             [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
             [Microsoft.AspNetCore.RateLimiting.EnableRateLimiting("partitioned-send")] // §9 reasoning/stream lane
@@ -306,7 +311,7 @@ public static class RealtimeApiEndpoints
                 if (data is null)
                     return Results.BadRequest(new { error = "data_invalid", detail = "body.data must be a JSON value" });
 
-                if (!connections.TryGetUser(id, out var identityKey))
+                if (!connections.TryGetOwner(id, out var identityKey))
                     return Results.NotFound(new { error = "connection_not_found", detail = "no live connection with this id in this process" });
 
                 var partition = partitioner.PartitionOf(http.User);
@@ -318,8 +323,11 @@ public static class RealtimeApiEndpoints
                 data["from"] = (string?)http.User.GetClientId() ?? "server";
                 data["sent_at"] = DateTime.UtcNow.ToString("o");
 
-                await hubContext.Clients.Client(id).SendAsync("event", data);
-                return Results.Ok(new { ok = true, connection_id = id, connection_partition = partition });
+                var sockets = connections.SocketsFor(id);
+                if (sockets.Count == 0)
+                    return Results.NotFound(new { error = "connection_not_connected", detail = "logical id is known but has no live sockets (reconnect pending)" });
+                await hubContext.Clients.Clients(sockets).SendAsync("event", data);
+                return Results.Ok(new { ok = true, connection_id = id, connection_partition = partition, delivered = sockets.Count });
             });
 
         // ── POST /api/groups — create a group record, auto-scoped to the

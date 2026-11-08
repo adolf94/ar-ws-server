@@ -1,4 +1,4 @@
-# CONTRACT — realtime server API, v1 (frozen 2026-11-07)
+# CONTRACT — realtime server API, v1.1 (v1 frozen 2026-11-07; addressing model amended 2026-11-08)
 
 > **Purpose**: Authoritative wire contract specification for the Realtime Server HTTP API and SignalR bus.  
 > **Audience**: Backend engineers implementing event publishers and frontend/mobile developers connecting to the bus.  
@@ -37,7 +37,7 @@ Every non-2xx response follows: `{ "error": "<code>", "detail": "<human hint>" }
 * **400**: validation failure (`…_required`, `…_invalid`).
 * **401**: invalid or missing bearer token.
 * **403**: valid bearer with wrong scope (`GATE-2`) or foreign connection (`connection_not_in_partition`).
-* **404**: unknown group or connection (`group_not_found`, `connection_not_found`).
+* **404**: unknown group or connection (`group_not_found`; `connection_not_found` — no such id in this process, `connection_not_connected` — id known but currently boundless).
 * **429**: rate limited (`rate_limited` — see §2.1).
 
 ## 2.1 · Rate limiting
@@ -52,6 +52,32 @@ Fixed window per `client_id` partition (anonymous callers share the `anon` parti
 * **Rejections**: HTTP 429 + `Retry-After` (seconds until window reset) + `{ "error": "rate_limited", "detail": "…" }`.
 * Rate limits are isolated per partition; an exhausted budget on one `client_id` never impacts another.
 * Rate limiting behavior does not alter JSON response schemas in `openapi-v1.json`.
+
+## 2.2 · Addressing model (v1.1)
+
+Three addresses with three lifetimes:
+
+| Address | Scope | Lifetime | Reached via |
+|---|---|---|---|
+| **`socket_id`** | one live transport socket | dies with the socket; **changes on every reconnect** (each reconnect re-negotiates) | never — server-internal (logs/diagnostics only) |
+| **`connection_id`** | one logical client instance | survives client reconnects; dies on server restart (a new id is minted after) | `POST /api/connections/{id}/send`, `POST /api/connections/{id}/disconnect`, and its connect-time envelope |
+| **`user_id` (`sub`)** | the person, every tab/device at once | lives as long as the JWT identity | `user_channel\|{sub}`, `POST /api/users/{sub}/send` |
+
+* `connection_id` is **server-minted (UUIDv7, time-ordered)** at first connect to
+  `(client_id, sub, instance tag)` — clients never choose their own id, which
+  keeps the address authoritative and uniformly sortable.
+* The instance tag is the client's stable self-label (a UUID in localStorage /
+  process env), carried as the `instance` query parameter on the hub URL
+  (present on the WS upgrade request; the SignalR negotiate also forwards it).
+  It is NOT security-relevant: identity and partitioning are fenced by the
+  connection JWT; a forged tag only addresses a sibling socket of the same `sub`.
+* Sockets NOT sending a tag get per-socket logical ids (fresh each reconnect —
+  legacy one-socket semantics).
+* **Reconnect rebind**: the same tag re-binds to the SAME `connection_id`; a
+  stale socket still bound to it is superseded (server aborts it on bind).
+* Persistence is deliberately out of scope for v1.1: ids survive **client**
+  reconnects only. A server restart mints new ids — senders must treat
+  `404 connection_not_found` as the cue to fall back to the user-channel lane.
 
 ## 3 · Event envelope (all sends delivered as SignalR method "event")
 
@@ -100,8 +126,8 @@ Entry points: python `coalesced_send_to_user(sub)` / `coalesced_send_to_connecti
 | `POST /api/publish` | Bearer+scope | `{group, data}` | `{ok, group, partition}` | 400 group_required/data_required/data_invalid |
 | `POST /api/broadcast` | Bearer+scope | `{groups[], data}` | `{ok, partition, groups_delivered[], unknown_groups[]}` | 400 groups_required/data_… |
 | `POST /api/users/{sub}/send` | Bearer+scope | `{data}` | `{ok, user_id}` | 400 data_… |
-| `POST /api/connections/{id}/send` | Bearer+scope | `{data}` | `{ok, connection_id, connection_partition}` | 400 data_… · 404 connection_not_found · 403 connection_not_in_partition |
-| `POST /api/connections/{id}/disconnect` | Bearer+scope | — | `{ok, connection_id, connection_partition, aborted}` | 404/403 same scoping |
+| `POST /api/connections/{id}/send` | Bearer+scope | `{data}` | `{ok, connection_id, connection_partition, delivered}` — fans to every socket bound to the logical id | 400 data_… · 404 connection_not_found / connection_not_connected (id known, zero live sockets) · 403 connection_not_in_partition |
+| `POST /api/connections/{id}/disconnect` | Bearer+scope | — | `{ok, connection_id, connection_partition, aborted}` — `aborted` counts the sockets force-closed | 404/403 same scoping |
 | `POST /api/groups` | Bearer+scope | `{name, history?, history_size?, history_ttl_seconds?}` | `201 {ok, created:true, group, partition, history_enabled}` · `200 {…}` (idempotent; re-posting with `history:true` tunes config) | 400 group_name_required |
 | `POST /api/groups/{g}/members` | Bearer+scope | `{user_id}` | `{ok, group, group_partition, member{user_id,client_id}, connections_joined}` | 404 group_not_found |
 | `DELETE /api/groups/{g}/members?user_id=` | Bearer+scope | — | `{ok, group, group_partition, member{…}, removed}` | 404 group_not_found |
@@ -122,6 +148,9 @@ Entry points: python `coalesced_send_to_user(sub)` / `coalesced_send_to_connecti
 
 ## 5 · Connect-time placement (hub side, automatic)
 
+* **Mint & bind (v1.1, §2.2)**: at connect the server binds the socket to the logical `connection_id` for `(client_id, sub, instance tag)` — the tag arrives as the `instance` query parameter on the hub URL; first sight mints a UUIDv7; a reconnect with the same tag re-binds to the SAME id and **supersedes** any stale socket still bound to it (server force-aborts it).
+* **Id delivery**: the hub has no client-invocable methods (§1), so the id is handed over as a server-published envelope addressed to the just-connected socket:
+  `{ "type": "connection_registered", "connection_id": "<uuidv7>", "socket_id": "<transport id>", "instance_tagged": <bool>, "superseded": <n>, "from": "server", "sent_at": … }`
 * Stored membership is re-applied upon connect and on every reconnect. App backends do not need to re-add members after client reconnects.
 * Every connection joins `user_channel|{sub}` (the global unicast lane).
 * Group membership persists through disconnects: presence `online` flips to false while membership remains until removed via `DELETE /api/groups/{g}/members`.

@@ -69,10 +69,16 @@ with publisher.coalesced_send_to_user(user_sub) as chunk_timeline:
 Per-TAB CoT streams ride the **connection lane** the same way —
 `coalesced_send_to_connection(connection_id)` (`offer`/`drain` semantics
 identical; independent single-flight windows per tab so each TAB's ordering is
-its own). A closed or foreign connection id surfaces as the non-429 drop path
-(404/403): the batch drops, the stream continues, `drain()` raises it once.
-The connection id comes from the SPA (it knows its own socket id — pass it in
-the job request that starts the stream).
+its own). `connection_id` is the server-minted LOGICAL id — the SPA reads it
+from the `connection_registered` envelope the server publishes on its socket,
+NOT SignalR's transport socket id — and passes it in the job request that
+starts the stream. Reconnect-stable ids need `?instance=<stable client tag>`
+appended to the SPA's hub url (untagged = fresh per-socket id each
+reconnect). A closed or foreign connection id surfaces as the non-429 drop
+path (404 `connection_not_connected` / `connection_not_found`; 403
+`connection_not_in_partition`): the batch drops, the stream continues,
+`drain()` raises it once — and connection 404 is the cue to fall back to
+`send_to_user`.
 
 Explicit form when you want the stats: `handle.drain()` → it re-raises the
 last batch failure once (typically `RealtimeApiError`; then the same stats,
