@@ -229,15 +229,18 @@ public static class RealtimeApiEndpoints
                 });
             });
 
-        // ── GET /api/my/connections — self-service inventory (2026-11-08):
-        // the users/{sub} read with the USER = THE CALLER: partition and sub
-        // derive from the VERIFIED bearer, so SPA/mobile clients can discover
-        // their own connection_id (e.g. to show it in a debug drawer) without
-        // knowing their raw sub string. Same-envelope response, same rate
-        // lane. Bearer only, NO publisher scope: the rows are the caller's
-        // own identity, and the connection JWT handshake of SPA users is the
-        // same scheme — matching the GET /api/groups* read-only posture.
-        endpoints.MapGet("/my/connections",
+        // ── GET /api/connections — my connections TRUE (2026-11-08): the
+        // SELF inventory, replacement of /my/connections. Identity derives
+        // from the VERIFIED bearer (caller = user); rows span partitions —
+        // every connection whose SUB is the caller's, REGARDLESS of which
+        // client_id it connected through, mirroring the user_channel|{sub}
+        // unicast lane (the /users/{sub}/send exception: sub addresses the
+        // person across all services, and this read answers the same key).
+        // Rows carry each connection's owning client_id so the caller sees
+        // which service holds it. Bearer only, NO publisher scope, rows are
+        // the caller's own subject only — no cross-identity read, matching
+        // the GET /api/groups* read posture.
+        endpoints.MapGet("/connections",
             [Authorize(AuthenticationSchemes = AuthSchemes.Idp)]
             (HttpContext http, IConnectionRegistry connections, IGroupPartitioner partitioner) =>
             {
@@ -248,46 +251,17 @@ public static class RealtimeApiEndpoints
                 if (string.IsNullOrEmpty(sub))
                     return Results.Unauthorized();
 
-                var partition = partitioner.PartitionOf(http.User);
-                var snapshot = connections.SnapshotsFor(partitioner.Physical(partition, sub));
-                return Results.Ok(new
-                {
-                    ok = true,
-                    user_id = sub,
-                    partition,
-                    connections = snapshot.Select(c => new
+                var all = connections.Snapshots()
+                    .Where(c => partitioner.IdentitySubject(c.OwnerKey) == sub)
+                    .Select(c => new
                     {
                         connection_id = c.ConnectionId,
+                        client_id = partitioner.IdentityPartition(c.OwnerKey),
                         instance_tag = c.InstanceTag,   // null = untagged per-socket id (legacy semantics)
                         persistent = c.Persistent,      // tagged: the id survives reconnect (boundless still)
                         sockets = c.Sockets,            // 0 = known but currently boundless
-                    }),
-                });
-            });
-
-        // ── GET /api/connections — CROSS-PARTITION operator inventory
-        // (2026-11-08): every logical connection in the process, REGARDLESS
-        // of client_id. Second deliberate exception to the partition wall
-        // (CONTRACT §4, after the global unicast lane): rows carry each
-        // connection's owning client_id + user_id, so callers see identities
-        // ACROSS partitions — an ops surface, not a scoped app read.
-        // Publisher-scope gated (every row is sensitive); rows are
-        // server-internal state that dies with the process (§2.2), so this
-        // must stay internal-network-only alongside /metrics.
-        endpoints.MapGet("/connections",
-            [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
-            (IConnectionRegistry connections, IGroupPartitioner partitioner) =>
-            {
-                var all = connections.Snapshots().Select(c => new
-                {
-                    connection_id = c.ConnectionId,
-                    client_id = partitioner.IdentityPartition(c.OwnerKey),
-                    user_id = partitioner.IdentitySubject(c.OwnerKey),
-                    instance_tag = c.InstanceTag,   // null = untagged per-socket id (legacy semantics)
-                    persistent = c.Persistent,      // tagged: the id survives reconnect (boundless still)
-                    sockets = c.Sockets,            // 0 = known but currently boundless
-                }).ToList();
-                return Results.Ok(new { ok = true, count = all.Count, connections = all });
+                    }).ToList();
+                return Results.Ok(new { ok = true, user_id = sub, count = all.Count, connections = all });
             });
 
         // ── POST /api/connections/{id}/disconnect — force-close a logical

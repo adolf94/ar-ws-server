@@ -26,8 +26,8 @@ changes require **v2**. Server-side placement rules are in §4–§5.
   membership, and per-socket ops. It is never accepted from a request body or query.
 * Cross-service unicast (`/api/users/{sub}/send`) is the one deliberate
   exception — it addresses `user_channel|{sub}`, not a partition.
-  (Additive v1.1, 2026-11-08: the `GET /api/connections` operator
-  inventory is the second — it READS across partitions but sends nothing.)
+  (Additive v1.1, 2026-11-08: `GET /api/connections` reads the same
+  sub-keyed plane, but ONLY the verified caller's own subject.)
 * WS lane: negotiate (`Bearer` header handshake) issues a ≤5-min
   connection JWT — the only credential accepted at the hub path. Clients never
   publish on the hub (no invocable methods exist).
@@ -136,8 +136,7 @@ Entry points: python `coalesced_send_to_user(sub)` / `coalesced_send_to_connecti
 | `GET /api/groups` | Bearer | — | `{ok, partition, groups:[{group, members, online}]}` | — |
 | `GET /api/groups/{g}/presence` | Bearer | — | `{ok, group, group_partition, presence:[{user_id, client_id, online, connections}]}` | 404 group_not_found |
 | `GET /api/users/{sub}/connections` | Bearer+scope | — | `{ok, user_id, partition, connections:[{connection_id, instance_tag, persistent, sockets}]}` — the caller's partition's logical connections for one user (the inventory for the per-connection lanes); ordered oldest-first (uuidv7). Unknown/foreign users → empty list (no existence leak) | — |
-| `GET /api/my/connections` | Bearer | — | `{ok, user_id, partition, connections:[{connection_id, instance_tag, persistent, sockets}]}` — self-service variant: partition + sub derive from the verified bearer (caller = user); same envelope | — |
-| `GET /api/connections` | Bearer+scope | — | `{ok, count, connections:[{connection_id, client_id, user_id, instance_tag, persistent, sockets}]}` — **cross-partition operator inventory**: every live logical connection in the process regardless of client_id, stacked partition-first (then sub, then mint order). Server-internal state that dies with the process (§2.2) | — |
+| `GET /api/connections` | Bearer | — | `{ok, user_id, count, connections:[{connection_id, client_id, instance_tag, persistent, sockets}]}` — the caller's OWN subject across ALL partitions (mirrors `user_channel\|{sub}`): every logical connection whose `sub` is the verified bearer's, regardless of which `client_id` it connected through; rows name the owning service | — |
 | `GET /api/groups/{g}/history?limit=` | Bearer+scope | `?limit` (1..10 000, default 100) | `{ok, group, group_partition, history_enabled, total, history:[event…]}` — ascending tail over non-expired entries | 404 group_not_found |
 | `DELETE /api/groups/{g}/history` | Bearer+scope | — | `{ok, group, group_partition, cleared}` (disabled buffer → `cleared:0`) | 404 group_not_found |
 | `GET /healthz` / `GET /openapi/v1.json` | none | — | config probe / spec | — |
@@ -146,13 +145,10 @@ Entry points: python `coalesced_send_to_user(sub)` / `coalesced_send_to_connecti
 > [!NOTE]
 > `/metrics` is a scrape surface in Prometheus text format (0.0.4), not a JSON API path. Expose this unauthenticated endpoint only on an internal network.
 
-> [!NOTE]
-> `GET /api/connections` is an operator surface: rows reveal `sub`s and connection ids across all `client_id` partitions. Gate exposure like `/metrics` — internal networks only.
-
 ### Scoping rules:
 
 * **Partitioned (prepended with caller's `client_id`)**: Publish, broadcast, group creation, member management, listing, presence, and per-socket send/disconnect. Callers only reach and see resources within their partition; per-socket operations reject foreign sockets with 403.
-* **Global**: `POST /api/users/{sub}/send` delivers to the user across all their active connections in any service; `GET /api/connections` reads the whole process inventory across all partitions (operator exception).
+* **Global**: `POST /api/users/{sub}/send` delivers to the user across all their active connections in any service; `GET /api/connections` reads the same sub-keyed plane — the caller's OWN connections across all partitions (no cross-identity read).
 
 ## 5 · Connect-time placement (hub side, automatic)
 
