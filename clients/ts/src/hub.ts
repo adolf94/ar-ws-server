@@ -68,7 +68,7 @@ export interface RealtimeHubOptions {
    * Semantics: same tag → the server re-binds the SAME logical
    * connection_id across reconnects (stale sockets superseded); no tag →
    * fresh per-socket id on every reconnect.
-   * DEFAULT `true` (v0.3.0): the SDK generates a UUID and persists it in
+   * DEFAULT `true` (v0.3.2): the SDK generates a UUID and persists it in
    * sessionStorage (`realtime-instance-tag`) in the browser — PER-TAB, so
    * every tab is its own logical instance (a localStorage-shared tag would
    * make two tabs supersede-abort each other's sockets on connect); Node
