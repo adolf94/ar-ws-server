@@ -16,6 +16,10 @@
 //   PART-1b instanceTag defaults ON — ?instance= present with no options
 //   PART-1c partition defaults to the token's client_id (aud contains it)
 //   PART-1d no partition rider when the aud misses client_id (fence-safe)
+//   BATCH-1 coalesced (batch_v:1) replayed: chunks delivered individually
+//           in order, provenance synthesized from the outer envelope +
+//           onBatch fires (CONTRACT §3.1)
+//   BATCH-2 unknown batch_v delivered raw (forward compat)
 //   PART-2  live alias: token aud contains the partition → connection lands in
 //           the partition; backend membership applies; publish delivers
 //   PART-3  live negative: partition missing from the token's aud → negotiate
@@ -285,6 +289,61 @@ await hub.stop();
   try { await negativeHub.start(); } catch (e) { negErr = e; }
   check('PART-3. partition missing from aud → negotiate rejected (start fails)',
     negErr !== null && negativeHub.state !== 'connected', `err=${String(negErr?.message ?? 'none').slice(0, 120)}`);
+}
+
+// BATCH gates: coalesced-stream consumption (CONTRACT §3.1) — the publisher
+// synthesizes the wire shape the coalescing SDKs produce
+{
+  let batchOuter = null;            // onBatch hook: the OUTER envelope
+  let rawBatches = [];              // unknown batch_v passes through raw
+  let chunkCount = 0, chunkOrder = [];
+  const batchHub = createRealtimeHub({
+    url: `${SRV}/realtime/hub`,
+    tokenFactory: async () => token,
+    onBatch: (e) => { batchOuter = e; },
+  });
+  batchHub.on('chunk_flash', (e) => { chunkOrder.push(e.chunk); chunkCount++; });
+  batchHub.on('stream_flash', (e) => { rawBatches.push(e); });
+  await batchHub.start();
+
+  // BATCH-1: publisher sends one coalesced envelope to the user's channel
+  await fetch(`${SRV}/api/users/${USER_SUB}/send`, {
+    method: 'POST', headers: authHdrs,
+    body: JSON.stringify({
+      data: {
+        type: 'stream_flash',
+        batch_v: 1,
+        batch: [
+          { type: 'chunk_flash', chunk: 'alpha' },
+          { type: 'chunk_flash', chunk: 'beta' },   // no from/sent_at → inherits outer provenance
+        ],
+      },
+    }),
+  });
+  await new Promise((r) => setTimeout(r, 900));
+  check('BATCH-1. coalesced (batch_v:1) flattened — chunks delivered in order, onBatch fired, provenance inherited',
+    chunkOrder.length === 2 && chunkOrder[0] === 'alpha' && chunkOrder[1] === 'beta'
+      && batchOuter?.batch_v === 1 && batchOuter?.from === 'spa-demo-client'
+      && typeof batchOuter?.sent_at === 'string',
+    ` chunks=${JSON.stringify(chunkOrder)} outer batch_v=${batchOuter?.batch_v ?? '—'} from=${batchOuter?.from ?? '—'}`);
+
+  // BATCH-2: unknown batch_v → the OUTER envelope passes through raw
+  await fetch(`${SRV}/api/users/${USER_SUB}/send`, {
+    method: 'POST', headers: authHdrs,
+    body: JSON.stringify({
+      data: {
+        type: 'stream_flash',
+        batch_v: 9,   // future format — forward compat (CONTRACT §3.1)
+        batch: [{ type: 'chunk_flash', chunk: 'gamma' }],
+      },
+    }),
+  });
+  await new Promise((r) => setTimeout(r, 900));
+  check('BATCH-2. unknown batch_v delivered raw (outer envelope, batch intact)',
+    rawBatches.length === 1 && Array.isArray(rawBatches[0]?.batch)
+      && rawBatches[0].batch.length === 1 && rawBatches[0].batch[0].chunk === 'gamma',
+    ` raw=${JSON.stringify(rawBatches[0] ?? null).slice(0, 140)}`);
+  await batchHub.stop();
 }
 
 console.log(`\nts conformance: ${failures === 0 ? 'ALL PASS' : `${failures} FAILURE(S)`}`);

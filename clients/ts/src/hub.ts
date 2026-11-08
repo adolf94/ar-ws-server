@@ -44,6 +44,23 @@ export interface RealtimeHubOptions {
    */
   onReconnected?: (connectionId: string | null) => void;
   logLevel?: LogLevel;
+  /** Coalesced-batch handling (CONTRACT §3.1): a publisher's single-flight
+   * stream can deliver ONE outer envelope carrying several original events
+   * (`{type, batch: [chunk…], batch_v: 1}`, server-stamped once).
+   *   * `flatten` (default) — every batch item is dispatched through
+   *     `on`/`onAny` INDIVIDUALLY, in order, exactly like a plain §3
+   *     delivery; chunks that omit `from`/`sent_at` inherit the outer
+   *     envelope's stamped provenance, so no consumer code changes are
+   *     needed to receive coalesced streams.
+   *   * `raw` — the outer envelope passes through as ONE event; you loop
+   *     `envelope.batch` yourself.
+   * Unknown `batch_v` values always pass through raw (forward compat:
+   * "new envelope additions would bump it"). */
+  coalescing?: "flatten" | "raw";
+  /** Fires once per coalesced outer envelope (both modes) BEFORE flatten —
+   * the provenance and `batch_v`/`batch` fields live here; use it for
+   * flush boundaries, stream handles, or telemetry. */
+  onBatch?: (envelope: RealtimeEvent) => unknown;
   /**
    * Stable instance self-label (CONTRACT §2.2) — CLIENT-SET by design, and
    * never security-relevant: the fence keeps identity inside the connection
@@ -240,6 +257,30 @@ export class RealtimeHubClient {
       }
     }
 
+    // coalesced batch (CONTRACT §3.1): known version → replay; unknown version → raw
+    const record = envelope as Record<string, unknown>;
+    const batch = record["batch"];
+    if (Array.isArray(batch) && record["batch_v"] === 1) {
+      this.options.onBatch?.(envelope);
+      if (this.options.coalescing !== "raw") {
+        const from = record["from"], sentAt = record["sent_at"];
+        for (const item of batch) {
+          const chunk = this.envelope(item);
+          if (!chunk) continue; // contract-less chunk: ignored (§3 receiver rule)
+          const chunkRecord = chunk as Record<string, unknown>;
+          // chunks ride VERBATIM (§3.1) — provenance is inner where present:
+          if (chunkRecord["from"] === undefined && from !== undefined) chunkRecord["from"] = from;
+          if (chunkRecord["sent_at"] === undefined && sentAt !== undefined) chunkRecord["sent_at"] = sentAt;
+          this.deliver(chunk);
+        }
+        return; // the outer envelope's payload IS the batch — don't double-deliver
+      }
+    }
+
+    this.deliver(envelope);
+  }
+
+  private deliver(envelope: RealtimeEvent): void {
     this.catchAll?.(envelope);
     const set = this.handlers.get(envelope.type);
     set?.forEach((handler) => {

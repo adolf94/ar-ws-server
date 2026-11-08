@@ -70,6 +70,15 @@ const hub = createRealtimeHub({
 * Rejection: `start()` fails with 403 — `partition_not_in_token` (aud miss) or `partition_not_allowed` (reserved pseudo-partition).
 * The control surface is IdP audience issuance: remove the audience grant, close the door — no server changes.
 
+## Coalesced Batches / stream chunking (CONTRACT §3.1)
+
+Publisher SDKs (`Ar.Realtime.Client`, `ar-realtime-client`) coalesce reasoning-stream deltas via single-flight flushes: ONE outer envelope `{"type": "<stream type>", "batch": [<chunk>...], "batch_v": 1}` is delivered by the server as a single event. This client **replays batches for you**:
+
+* `coalescing: 'flatten'` (default): each `batch` item is dispatched through `on`/`onAny` **individually, in order** — visible to your handlers as plain per-event envelopes. Chunks that omit `from`/`sent_at` inherit the outer envelope's server-stamped provenance, so existing consumers need **zero code changes** to receive coalesced streams.
+* `coalescing: 'raw'`: only the outer envelope is delivered — loop `envelope.batch` yourself (batchify renderer writes per flush boundary).
+* `onBatch: (outer) => …` fires once per coalesced envelope **before** flattening, in both modes — the stream handle (`type`), `batch_v`, and `batch` array live here; ideal for flush-boundary bookkeeping.
+* Forward compatibility: an unknown `batch_v` is delivered as the raw outer envelope (the contract bumps `batch_v` for new envelope additions).
+
 ## User-Agent & Cloudflare Handling
 
 To avoid triggering bot mitigations against default SignalR user agent strings, this client emits `realtime-client-ts/<version>`:
