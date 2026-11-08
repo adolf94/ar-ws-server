@@ -174,9 +174,9 @@ await hub.stop();
 // alias + instance tag) must MERGE into the query, not clobber caller params
 {
   const http = await import('node:http');
-  let negotiatePath = null;
+  const negotiatePaths = [];
   const echo = http.createServer((req, res) => {
-    if ((req.url ?? '').includes('/negotiate')) negotiatePath = req.url;
+    if ((req.url ?? '').includes('/negotiate')) negotiatePaths.push(req.url);
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({
       connectionId: 'echo-id',
@@ -196,10 +196,18 @@ await hub.stop();
   await echoHub.start().catch(() => {});   // the echo can't upgrade — fine
   await echoHub.stop();                    // stop() is idempotent even when start() failed
   check('PART-1. negotiate URL carries SDK riders (partition + instance) alongside caller params',
-    (negotiatePath ?? '').includes('partition=finance-app-api')
-      && (negotiatePath ?? '').includes('instance=probe-tag')
-      && (negotiatePath ?? '').includes('vendor=keep-me'),
-    `negotiate URL=${JSON.stringify(negotiatePath)}`);
+    (negotiatePaths[0] ?? '').includes('partition=finance-app-api')
+      && (negotiatePaths[0] ?? '').includes('instance=probe-tag')
+      && (negotiatePaths[0] ?? '').includes('vendor=keep-me'),
+    `negotiate URL=${JSON.stringify(negotiatePaths[0])}`);
+
+  // default rider: instanceTag defaults ON (v0.2.0) — same tab/process keeps
+  // its connection_id across reconnects without any explicit option
+  const plainEchoHub = createRealtimeHub({ url: `${echoUrl}/realtime/hub`, tokenFactory: async () => 'echo' });
+  await plainEchoHub.start().catch(() => {});
+  await plainEchoHub.stop();
+  check('PART-1b. instanceTag defaults ON — ?instance= present with no options',
+    (negotiatePaths[1] ?? '').includes('instance='), `negotiate URL=${JSON.stringify(negotiatePaths[1])}`);
   echo.close();
 }
 

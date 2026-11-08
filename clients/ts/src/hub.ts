@@ -51,12 +51,14 @@ export interface RealtimeHubOptions {
    * Semantics: same tag → the server re-binds the SAME logical
    * connection_id across reconnects (stale sockets superseded); no tag →
    * fresh per-socket id on every reconnect.
-   *   * `true`  → the SDK generates a UUID and persists it in
-   *               localStorage (`realtime-instance-tag`) in the browser, or
-   *               holds a per-process UUID in Node — reconnects from the
-   *               same tab/process keep their id.
-   *   * string  → used verbatim (e.g. the SPA's own stored UUID).
-   *   * absent  → legacy per-socket behavior.
+   * DEFAULT `true` (v0.2.0): the SDK generates a UUID and persists it in
+   * sessionStorage (`realtime-instance-tag`) in the browser — PER-TAB, so
+   * every tab is its own logical instance (a localStorage-shared tag would
+   * make two tabs supersede-abort each other's sockets on connect); Node
+   * holds a per-process UUID — reconnects from the same tab/process keep
+   * their id. `false` opts back into legacy per-socket ids; a string is
+   * used verbatim (e.g. the SPA's own stored UUID). A pre-existing
+   * `?instance=` in the hub url is honored as-is (never clobbered).
    */
   instanceTag?: string | boolean;
   /**
@@ -184,7 +186,7 @@ export class RealtimeHubClient {
     const url = new URL(this.options.url); // absolute hub URL is the documented shape
     const alias = this.options.partition;
     if (alias && alias.length > 0) url.searchParams.set("partition", alias);
-    const tag = resolveInstanceTag(this.options.instanceTag);
+    const tag = resolveInstanceTag(this.options.instanceTag ?? true);
     if (tag) url.searchParams.set("instance", tag);
     return url.toString();
   }
@@ -228,9 +230,12 @@ export function createRealtimeHub(options: RealtimeHubOptions): RealtimeHubClien
 }
 
 /* ── instance tag resolution (CONTRACT §2.2, client-set self-label) ─────── */
+// sessionStorage (NOT localStorage): the tag must be PER-TAB — every tab is
+// its own logical client instance. A localStorage-shared tag would make two
+// tabs supersede-abort each other's sockets on every connect.
 const INSTANCE_STORAGE_KEY = "realtime-instance-tag";
 
-const hasLocalStorage = typeof localStorage !== "undefined";
+const hasSessionStorage = typeof sessionStorage !== "undefined";
 const hasNetworkUuid =
   typeof crypto !== "undefined" && typeof crypto.randomUUID === "function";
 const moduleTag: string | null =
@@ -238,13 +243,13 @@ const moduleTag: string | null =
 
 function resolveInstanceTag(option?: string | boolean): string | null {
   if (option === true) {
-    if (hasLocalStorage) {
+    if (hasSessionStorage) {
       try {
-        const existing = localStorage.getItem(INSTANCE_STORAGE_KEY);
+        const existing = sessionStorage.getItem(INSTANCE_STORAGE_KEY);
         if (existing) return existing;
         const fresh = hasNetworkUuid ? crypto.randomUUID() : null;
         if (fresh) {
-          localStorage.setItem(INSTANCE_STORAGE_KEY, fresh);
+          sessionStorage.setItem(INSTANCE_STORAGE_KEY, fresh);
           return fresh;
         }
       } catch {
