@@ -1,0 +1,535 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Realtime API Tester</title>
+<style>
+  :root {
+    --bg: #0d1117; --panel: #161b22; --border: #30363d; --text: #c9d1d9;
+    --muted: #8b949e; --accent: #58a6ff; --green: #3fb950; --red: #f85149;
+    --amber: #d29922; --mono: ui-monospace, 'Cascadia Code', Consolas, monospace;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--text); font: 14px/1.5 -apple-system, 'Segoe UI', sans-serif; }
+  header { padding: 12px 20px; border-bottom: 1px solid var(--border); display: flex; align-items: baseline; gap: 12px; }
+  header h1 { font-size: 16px; margin: 0; }
+  header span { color: var(--muted); font-size: 12px; font-family: var(--mono); }
+  main { display: grid; grid-template-columns: 420px 1fr; gap: 16px; padding: 16px 20px; align-items: start; }
+  @media (max-width: 900px) { main { grid-template-columns: 1fr; } }
+  section { background: var(--panel); border: 1px solid var(--border); border-radius: 8px; padding: 14px 16px; }
+  h2 { font-size: 12px; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); margin: 0 0 10px; }
+  label { display: block; font-size: 12px; color: var(--muted); margin: 10px 0 3px; }
+  label b { color: var(--accent); font-weight: 500; }
+  input, select, textarea { width: 100%; background: var(--bg); color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 7px 9px; font-size: 13px; font-family: inherit; }
+  input:focus, select:focus, textarea:focus { outline: none; border-color: var(--accent); }
+  textarea { font-family: var(--mono); resize: vertical; min-height: 70px; }
+  .flex { display: flex; gap: 10px; }
+  .flex > * { flex: 1; }
+  button { background: #21262d; color: var(--text); border: 1px solid var(--border); border-radius: 6px; padding: 8px 14px; font-size: 13px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  button.primary { background: #1f6feb; border-color: #1f6feb; color: #fff; font-weight: 600; }
+  button.primary:disabled { opacity: .5; cursor: default; }
+  button.small { padding: 4px 10px; font-size: 12px; }
+  .row { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+  .token-box { margin-top: 10px; border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; font-family: var(--mono); font-size: 12px; word-break: break-all; }
+  .ok { color: var(--green); } .err { color: var(--red); } .warn { color: var(--amber); }
+  .kv { display: grid; grid-template-columns: max-content 1fr; gap: 2px 10px; color: var(--muted); }
+  .kv dt { color: var(--accent); }
+  .kv dd { margin: 0; color: var(--text); }
+  #output { min-height: 300px; }
+  .statusbar { display: flex; align-items: center; gap: 14px; margin-bottom: 10px; font-family: var(--mono); font-size: 13px; }
+  .chip { border: 1px solid var(--border); border-radius: 12px; padding: 1px 10px; font-weight: 600; }
+  .chip.g { color: var(--green); border-color: var(--green); }
+  .chip.r { color: var(--red); border-color: var(--red); }
+  .chip.a { color: var(--amber); border-color: var(--amber); }
+  .lg { color: var(--muted); } .lg-ok { color: var(--green); } .lg-err { color: var(--red); }
+  .lg-ev { color: var(--accent); } .lg-t { opacity: .55; }
+  pre.json { margin: 0; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 12px; font-family: var(--mono); font-size: 12.5px; white-space: pre-wrap; word-break: break-word; max-height: 55vh; overflow: auto; }
+  #request-preview { font-family: var(--mono); font-size: 12px; color: var(--muted); background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 8px 10px; word-break: break-all; }
+  #log { list-style: none; margin: 8px 0 0; padding: 0; font-family: var(--mono); font-size: 12px; max-height: 220px; overflow: auto; }
+  #log li { display: flex; gap: 10px; padding: 4px 6px; cursor: pointer; border-radius: 4px; }
+  #log li:hover { background: #21262d; }
+  #log .m { color: var(--accent); min-width: 60px; } #log .s { min-width: 34px; text-align: right; }
+  .hint { font-size: 11px; color: var(--muted); margin-top: 4px; }
+  details { margin-top: 8px; } summary { font-size: 12px; color: var(--muted); cursor: pointer; user-select: none; }
+  input[type=checkbox] { width: auto; accent-color: #1f6feb; }
+  .check { display: flex; align-items: center; gap: 6px; font-size: 12px; color: var(--muted); margin: 10px 0 0; }
+</style>
+<!-- bus probe: same client family as clients/ts (@microsoft/signalr ^10) -->
+<script src="https://cdn.jsdelivr.net/npm/@microsoft/signalr@10.0.0/dist/browser/signalr.min.js"></script>
+</head>
+<body>
+<header>
+  <h1>Realtime API Tester</h1>
+  <span>contract: docs/CONTRACT.md (v1.1) — everything goes through base_url / <b id="hdr-base"></b></span>
+</header>
+<main>
+  <div>
+    <section>
+      <h2>Connection</h2>
+      <label>base_url (local CORS-proxy or the server itself)</label>
+      <input id="f-base" value="http://localhost:9999/websockets" placeholder="http://localhost:9999/websockets">
+      <div class="check"><input type="checkbox" id="f-autoretry" checked> auto-mint on 401 and retry once</div>
+    </section>
+
+    <section style="margin-top:14px">
+      <h2>Auth — client_credentials @ auth.adolfrey.com/api</h2>
+      <div class="flex">
+        <div><label>client_id</label><input id="f-client" placeholder="service client id"></div>
+        <div><label>client_secret</label><input id="f-secret" type="password" placeholder="●●●"></div>
+      </div>
+      <label>scope</label>
+      <input id="f-scope" value="api://ws-server/app:publisher">
+      <div class="row">
+        <button id="btn-mint" class="primary small">Mint token</button>
+        <button id="btn-clear" class="small">Clear token</button>
+        <span id="mint-status"></span>
+      </div>
+      <details>
+        <summary>authority / manual token</summary>
+        <label>authority (OIDC discovery)</label>
+        <input id="f-authority" value="https://auth.adolfrey.com/api">
+        <label>…or paste a bearer token directly</label>
+        <input id="f-manual-token" class="mono" placeholder="eyJhbGciOi…">
+        <div class="row"><button id="btn-paste" class="small">Use pasted token</button></div>
+        <div class="hint">e.g. the cached one: cat dev/e2e/.idp-token-cache.json</div>
+      </details>
+      <div id="token-box" class="token-box" hidden></div>
+    </section>
+
+    <section style="margin-top:14px">
+      <h2>Action</h2>
+      <label>action</label>
+      <select id="f-action"></select>
+      <div id="fields"></div>
+      <div class="row"><button id="btn-send" class="primary">Send</button></div>
+      <h2 style="margin-top:18px">Request</h2>
+      <div id="request-preview">—</div>
+    </section>
+
+    <section style="margin-top:14px" hidden id="log-section">
+      <h2>Call log (click to reopen)</h2>
+      <ul id="log"></ul>
+    </section>
+  </div>
+
+  <div>
+    <section id="output">
+      <h2>Response</h2>
+      <div id="statusbar" class="statusbar" hidden></div>
+      <details id="hdr-details" hidden><summary>response headers</summary><pre class="json" id="hdrs"></pre></details>
+      <pre class="json" id="body">Send a request…</pre>
+    </section>
+
+    <section id="probe" style="margin-top:14px">
+      <h2>Bus probe — SignalR /realtime/hub</h2>
+      <div class="row" style="margin-top:2px">
+        <button id="btn-probe-connect" class="small primary">Connect</button>
+        <button id="btn-probe-disconnect" class="small" disabled>Disconnect</button>
+        <span id="probe-status" class="warn">offline</span>
+      </div>
+      <label>instance tag (?instance= — stable self-label; reconnect rebinds the same connection_id)</label>
+      <input id="probe-instance" placeholder="e.g. ui-probe-1 (empty = per-socket id, fresh every reconnect)">
+      <div class="check">
+        <input type="checkbox" id="probe-autofill" checked>
+        auto-fill the latest <b>connection_id</b> into the per-connection actions
+      </div>
+      <div class="row">
+        <button id="btn-probe-copy" class="small">Copy last connection_id</button>
+        <button id="btn-probe-clear" class="small">Clear log</button>
+      </div>
+      <h2 style="margin-top:14px">Probe log</h2>
+      <pre class="json" id="probe-log" style="max-height:34vh">idle — /negotiate is sent with the current token's Authorization: Bearer JWT.</pre>
+    </section>
+  </div>
+</main>
+
+<script>
+'use strict';
+
+/* ── endpoint config (docs/CONTRACT.md §4) ─────────────────────────────── */
+const ROUTES = [
+  { id: 'groups.list',  label: 'list groups',            m: 'GET',    p: '/api/groups' },
+  { id: 'groups.create',label: 'create group',           m: 'POST',   p: '/api/groups', f: [
+    { k: 'group', t: 'text', b: 1, req: 1, ph: 'my-group' },
+    { k: 'history', t: 'check', b: 1 },
+    { k: 'history_size', t: 'num', b: 1, ph: '100' },
+    { k: 'history_ttl_seconds', t: 'num', b: 1, ph: '3600' }]},
+  { id: 'member.add',   label: 'add member',             m: 'POST',   p: '/api/groups/{group}/members', f: [
+    { k: 'group', t: 'text', req: 1, ph: 'my-group' },
+    { k: 'user_id', t: 'text', b: 1, req: 1, ph: '42' }]},
+  { id: 'member.remove',label: 'remove member',          m: 'DELETE', p: '/api/groups/{group}/members', f: [
+    { k: 'group', t: 'text', req: 1, ph: 'my-group' },
+    { k: 'user_id', t: 'text', q: 1, req: 1, ph: '42' }]},
+  { id: 'presence',     label: 'presence (GET group)',   m: 'GET',    p: '/api/groups/{group}/presence', f: [
+    { k: 'group', t: 'text', req: 1, ph: 'my-group' }]},
+  { id: 'history',      label: 'group history',          m: 'GET',    p: '/api/groups/{group}/history', f: [
+    { k: 'group', t: 'text', req: 1, ph: 'my-group' },
+    { k: 'limit', t: 'num', q: 1, ph: '100' }]},
+  { id: 'history.clear',label: 'clear group history',    m: 'DELETE', p: '/api/groups/{group}/history', f: [
+    { k: 'group', t: 'text', req: 1, ph: 'my-group' }]},
+  { id: 'publish',      label: 'publish (group)',        m: 'POST',   p: '/api/publish', f: [
+    { k: 'group', t: 'text', b: 1, req: 1, ph: 'my-group' },
+    { k: 'data', t: 'json', b: 1, req: 1, ph: '{\n  "type": "chat.message",\n  "text": "hello"\n}' }]},
+  { id: 'broadcast',    label: 'broadcast (groups[])',   m: 'POST',   p: '/api/broadcast', f: [
+    { k: 'groups', t: 'csv', b: 1, req: 1, ph: 'group-a,group-b' },
+    { k: 'data', t: 'json', b: 1, req: 1, ph: '{\n  "type": "notice",\n  "text": "hello all"\n}' }]},
+  { id: 'user.send',    label: 'send to user (global)',  m: 'POST',   p: '/api/users/{sub}/send', f: [
+    { k: 'sub', t: 'text', req: 1, ph: '42' },
+    { k: 'data', t: 'json', b: 1, req: 1, ph: '{\n  "type": "ai.delta",\n  "chunk": "\u2026"\n}' }]},
+  { id: 'user.connections', label: 'user connections (inventory)', m: 'GET', p: '/api/users/{sub}/connections', f: [
+    { k: 'sub', t: 'text', req: 1, ph: '42' }]},
+  { id: 'connections.all', label: 'my connections (all client_ids)', m: 'GET', p: '/api/connections', f: []},
+  { id: 'conn.send',    label: 'send to connection',     m: 'POST',   p: '/api/connections/{id}/send', f: [
+    { k: 'id', t: 'text', req: 1, ph: 'connection_id (uuidv7)' },
+    { k: 'data', t: 'json', b: 1, req: 1, ph: '{\n  "type": "ai.delta",\n  "chunk": "\u2026"\n}' }]},
+  { id: 'conn.disconnect', label: 'disconnect connection', m: 'POST', p: '/api/connections/{id}/disconnect', f: [
+    { k: 'id', t: 'text', req: 1, ph: 'connection_id (uuidv7)' }]},
+  { id: 'meta.healthz', label: 'healthz (no auth)',      m: 'GET',    p: '/healthz', a: false },
+  { id: 'meta.openapi', label: 'openapi spec (no auth)', m: 'GET',    p: '/openapi/v1.json', a: false },
+];
+const DEFAULTS = { 'groups.create': { group: 'my-group' }, 'member.add': { user_id: '42' } };
+
+/* ── state ─────────────────────────────────────────────────────────────── */
+const $ = id => document.getElementById(id);
+const LS = 'rt-tester';
+let token = null;          // {access_token, claims, minted_at}
+let callLog = [];          // {routeId, method, url, status, ts, resp}
+
+function save() {
+  const fields = {};
+  document.querySelectorAll('[id^=f-]').forEach(el => fields[el.id] = el.value);
+  localStorage.setItem(LS, JSON.stringify(fields));
+}
+function load() {
+  try {
+    const fields = JSON.parse(localStorage.getItem(LS) || '{}');
+    Object.entries(fields).forEach(([k, v]) => { const el = $(k); if (el) el.value = v; });
+  } catch {}
+}
+const base = () => $('f-base').value.trim().replace(/\/+$/, '');
+
+/* ── token handling ────────────────────────────────────────────────────── */
+const decodeJwt = t => JSON.parse(new TextDecoder().decode(Uint8Array.from(atob(t.split('.')[1].replaceAll('-', '+').replaceAll('_', '/')), c => c.charCodeAt(0))));
+
+function showToken() {
+  const box = $('token-box');
+  if (!token) { box.hidden = true; renderMintStatus(); return; }
+  const c = token.claims, exp = (c.exp ?? 0) * 1000, expired = Date.now() >= exp;
+  box.hidden = false;
+  box.innerHTML = `<div class="${expired ? 'err' : 'ok'}">${expired ? 'EXPIRED' : 'valid'} — expires ${new Date(exp).toLocaleTimeString()}</div>
+    <dl class="kv" style="margin-top:6px">
+      <dt>sub</dt><dd>${esc(c.sub ?? '—')}</dd>
+      <dt>client_id</dt><dd>${esc(c.client_id ?? '—')}</dd>
+      <dt>scope</dt><dd>${esc(c.scope ?? '—')}</dd>
+      <dt>iss</dt><dd>${esc(c.iss ?? '—')}</dd>
+    </dl>`;
+  renderMintStatus(expired);
+}
+function renderMintStatus(expired) {
+  $('mint-status').innerHTML = !token ? '<span class="warn">no token</span>'
+    : expired ? '<span class="err">expired</span>' : '<span class="ok">token ready</span>';
+}
+function setToken(raw) {
+  if (!raw) return;
+  token = { access_token: raw, claims: decodeJwt(raw), minted_at: new Date().toISOString() };
+  localStorage.setItem('rt-tester-token', JSON.stringify(token));
+  showToken();
+}
+
+async function mint() {
+  const authority = $('f-authority').value.trim().replace(/\/+$/, '');
+  const clientId = $('f-client').value.trim(), secret = $('f-secret').value, scope = $('f-scope').value.trim();
+  if (!clientId || !secret) { $('mint-status').innerHTML = '<span class="err">client_id / client_secret required</span>'; return; }
+  $('mint-status').innerHTML = '<span class="warn">minting…</span>';
+  try {
+    const disc = await fetch(`${authority}/.well-known/openid-configuration`).then(r => r.json());
+    if (!disc.token_endpoint) throw new Error('discovery: no token_endpoint');
+    const body = new URLSearchParams({ grant_type: 'client_credentials', client_id: clientId, client_secret: secret });
+    if (scope) body.set('scope', scope);
+    const res = await fetch(disc.token_endpoint, { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body });
+    const text = await res.text();
+    if (!res.ok) throw new Error(`token endpoint ${res.status}: ${text}`);
+    setToken(JSON.parse(text).access_token);
+  } catch (e) {
+    $('mint-status').innerHTML = `<span class="err" title="${esc(String(e))}">mint failed</span>`;
+    $('body').textContent = String(e);
+  }
+}
+
+const esc = s => String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+const tokenValid = () => token && (token.claims.exp ?? 0) * 1000 > Date.now();
+
+/* ── action form ───────────────────────────────────────────────────────── */
+function route() { return ROUTES.find(r => r.id === $('f-action').value); }
+
+function renderFields() {
+  const r = route();
+  const saved = JSON.parse(localStorage.getItem(LS + '-fields') || '{}');
+  const last = saved[r.id] || {};
+  const host = $('fields');
+  host.innerHTML = '';
+  (r.f || []).forEach(f => {
+    const id = `p-${r.id}-${f.k}`;
+    const val = last[f.k] ?? DEFAULTS[r.id]?.[f.k] ?? '';
+    if (f.t === 'check') {
+      host.insertAdjacentHTML('beforeend', `<div class="check"><input type="checkbox" id="${id}" ${val !== '' && val !== false ? 'checked' : ''}> history</div>`);
+    } else if (f.t === 'json') {
+      host.insertAdjacentHTML('beforeend', `<label><b>${esc(f.k)}</b> (JSON body)</label><textarea id="${id}" placeholder="${esc(f.ph || '')}">${esc(val)}</textarea>`);
+    } else if (f.t === 'csv') {
+      host.insertAdjacentHTML('beforeend', `<label><b>${esc(f.k)}</b> (comma-separated)</label><input id="${id}" value="${esc(val)}" placeholder="${esc(f.ph || '')}">`);
+    } else {
+      const t = f.t === 'num' ? 'number' : 'text';
+      const note = f.q ? ' (query)' : '';
+      host.insertAdjacentHTML('beforeend', `<label><b>${esc(f.k)}</b>${note}</label><input id="${id}" type="${t}" value="${esc(val)}" placeholder="${esc(f.ph || '')}">`);
+    }
+  });
+  preview();
+}
+function collectFields() {
+  const r = route(), path = {}, query = {}, body = {};
+  (r.f || []).forEach(f => {
+    const el = $(`p-${r.id}-${f.k}`);
+    let v = el.type === 'checkbox' ? el.checked : el.value.trim();
+    if (v === null || v === '' || v === false) return;
+    if (f.t === 'num') v = Number(v);
+    if (f.q) query[f.k] = v;
+    else if (f.b) {
+      if (f.t === 'csv') body[f.k] = String(v).split(',').map(s => s.trim()).filter(Boolean);
+      else if (f.t === 'json') { try { v = JSON.parse(v); } catch {} body[f.k] = v; }
+      else body[f.k] = v;
+    } else path[f.k] = v;
+  });
+  localStorage.setItem(LS + '-fields', JSON.stringify({ ...JSON.parse(localStorage.getItem(LS + '-fields') || '{}'), [r.id]: Object.fromEntries((r.f || []).map(f => [f.k, $(`p-${r.id}-${f.k}`).type === 'checkbox' ? $(`p-${r.id}-${f.k}`).checked : $(`p-${r.id}-${f.k}`).value]))}));
+  return { path, query, body };
+}
+function buildRequest() {
+  const r = route(), { path, query, body } = collectFields();
+  let url = base() + r.p.replaceAll(/\{(\w+)\}/g, (_, k) => encodeURIComponent(path[k] ?? `{${k}}`));
+  const qs = new URLSearchParams(query).toString();
+  if (qs) url += `?${qs}`;
+  const needsAuth = r.a !== false;
+  return { method: r.m, url, needsAuth, body: needsAuth && r.m !== 'GET' ? body : null };
+}
+function preview() {
+  const { method, url, needsAuth, body } = buildRequest();
+  $('request-preview').textContent = `${method} ${url}` + (needsAuth ? `\nAuthorization: Bearer …` : '') + (body && Object.keys(body).length ? `\n${JSON.stringify(body, null, 2)}` : '');
+  $('hdr-base').textContent = base() || '(base_url not set)';
+}
+
+/* ── response rendering ────────────────────────────────────────────────── */
+let lastResp = null;
+function renderResponse(resp) {
+  lastResp = resp;
+  const bar = $('statusbar');
+  bar.hidden = false;
+  bar.innerHTML = `<span class="chip ${resp.status < 300 ? 'g' : resp.status < 500 ? 'r' : 'a'}">${resp.status}</span>
+    <span style="color:var(--muted)">${resp.latency_ms} ms</span>
+    ${resp.headers['retry-after'] ? `<span class="warn">Retry-After: ${esc(resp.headers['retry-after'])}</span>` : ''}`;
+  $('hdr-details').hidden = false;
+  $('hdrs').textContent = Object.entries(resp.headers).map(([k, v]) => `${k}: ${v}`).join('\n');
+  let pretty = resp.body;
+  try { pretty = JSON.stringify(JSON.parse(pretty), null, 2); } catch {}
+  $('body').textContent = pretty || '(empty body)';
+}
+
+/* ── call log ──────────────────────────────────────────────────────────── */
+function addLog(routeId, method, url, status, resp) {
+  callLog.unshift({ routeId, method, url, status, resp, ts: new Date().toLocaleTimeString() });
+  callLog = callLog.slice(0, 25);
+  $('log-section').hidden = false;
+  $('log').innerHTML = callLog.map((e, i) =>
+    `<li data-i="${i}"><span class="m">${esc(e.method)}</span><span class="s ${e.status < 300 ? 'ok' : 'err'}">${e.status}</span><span style="color:var(--muted)">${esc(e.url)}</span><span style="margin-left:auto;color:var(--muted)">${esc(e.ts)}</span></li>`).join('');
+}
+$('log').addEventListener('click', e => {
+  const li = e.target.closest('li'); if (!li) return;
+  const entry = callLog[+li.dataset.i];
+  $('f-action').value = entry.routeId; renderFields(); renderResponse(entry.resp);
+});
+
+/* ── send ──────────────────────────────────────────────────────────────── */
+async function runSend(retried = false) {
+  const { method, url, needsAuth, body: reqBody } = buildRequest();
+  save();
+  if (!base()) { $('body').textContent = 'set base_url first'; return; }
+  if (needsAuth && !tokenValid()) {
+    if ($('f-autoretry').checked && $('f-client').value.trim() && $('f-secret').value) {
+      await mint();
+      if (!tokenValid()) { $('body').textContent = 'mint failed — check credentials / authority, or paste a token manually'; return; }
+    } else { $('body').textContent = 'no valid token — click Mint token (or paste one)'; return; }
+  }
+  const headers = needsAuth ? { Authorization: `Bearer ${token.access_token}` } : {};
+  const hasBody = needsAuth && method !== 'GET' && reqBody && Object.keys(reqBody).length;
+  $('btn-send').disabled = true; $('body').textContent = '…';
+  const t0 = performance.now();
+  try {
+    const res = await fetch(url, { method, headers: { ...headers, ...(hasBody ? { 'Content-Type': 'application/json' } : {}) }, body: hasBody ? JSON.stringify(reqBody) : undefined });
+    const text = await res.text();
+    const resp = { status: res.status, latency_ms: Math.round(performance.now() - t0), headers: Object.fromEntries(res.headers), body: text };
+    if (res.status === 401 && needsAuth && !retried && $('f-autoretry').checked) {
+      await mint();
+      return runSend(true);
+    }
+    renderResponse(resp);
+    addLog(route().id, method, url, res.status, resp);
+  } catch (e) {
+    $('statusbar').hidden = true;
+    $('body').textContent = `request failed — is base_url reachable?\n\n${String(e)}`;
+  }
+  $('btn-send').disabled = false;
+}
+
+/* ── bus probe (SignalR client → /realtime/hub) ────────────────────────── */
+// connect-time flow (CONTRACT §1/§5): negotiate POST carries the IdP bearer
+// via accessTokenFactory; the fence injects the ≤5-min connection JWT into
+// the negotiate response, which the JS client then uses for the WS
+// handshake. Never skipNegotiation — negotiate IS the auth entry point.
+let probe = null;
+let probeConnId = null;
+
+function pLog(cls, text) {
+  const el = $('probe-log');
+  if (el.textContent === 'idle — connects with the current token\'s identity.' ||
+      el.textContent.startsWith('cleared.') || el.textContent.startsWith('idle')) el.textContent = '';
+  const time = new Date().toLocaleTimeString();
+  el.insertAdjacentHTML('beforeend', `<div><span class="lg-t">[${time}]</span> <span class="${cls}">${esc(text)}</span></div>`);
+  while (el.childElementCount > 200) el.removeChild(el.firstChild);
+  el.scrollTop = el.scrollHeight;
+}
+function pState(text, cls) { $('probe-status').className = cls; $('probe-status').textContent = text; }
+
+function watchEnvelope(data) {
+  // delivery envelope: CONTRACT §3 — server stamps from/sent_at
+  const json = typeof data === 'string' ? data : JSON.stringify(data, null, 2);
+  const type = data?.type ?? '—';
+  if (type === 'connection_registered') {
+    probeConnId = data.connection_id ?? null;
+    pLog('lg-ok', `⬅ connection_registered  connection_id=${data.connection_id}  instance_tagged=${data.instance_tagged}  superseded=${data.superseded ?? 0}`);
+    pLog('lg', json);
+    if (probeConnId && $('probe-autofill').checked) {
+      const send = $('p-conn.send-id'), disc = $('p-conn.disconnect-id');
+      if (send) send.value = probeConnId;
+      if (disc) disc.value = probeConnId;
+      preview();
+      pLog('lg', `autofilled connection_id into "send to connection" / "disconnect connection" actions`);
+    }
+  } else {
+    pLog('lg-ev', `⬅ event  type=${type}  from=${data?.from ?? '—'}`);
+    pLog('lg', json);
+  }
+}
+
+// The probe REQUIRES a JWT for /negotiate: the fence accepts the IdP bearer
+// by Authorization HEADER only on the negotiate path (ArAccessTokenHandler),
+// so connect without a valid token is refused — @microsoft/signalr puts the
+// accessTokenFactory's JWT in the negotiate's Authorization header, and the
+// server then swaps in the ≤5-min connection JWT for the WS handshake
+// (SecurityFenceMiddleware: { url, accessToken } negotiate extension).
+async function probeConnect() {
+  if (typeof signalR === 'undefined') {
+    pLog('lg-err', 'SignalR client not loaded (CDN script blocked?) — check network/devtools and reload');
+    return;
+  }
+  if (!base()) { pLog('lg-err', 'set base_url first'); return; }
+
+  // required: a valid bearer JWT before /negotiate is attempted
+  if (!tokenValid()) {
+    if ($('f-client').value.trim() && $('f-secret').value) {
+      pLog('lg', '/negotiate needs a JWT — minting…');
+      await mint();
+    }
+    if (!tokenValid()) {
+      pState('no token', 'err');
+      pLog('lg-err', '/negotiate REFUSED: a bearer JWT is required (mint one in the Auth section, or paste it there manually)');
+      return;
+    }
+  }
+  const claims = token.claims;
+  if (!claims.sub) {
+    pState('token has no sub', 'err');
+    pLog('lg-err', 'probe refused: the fence rejects identityless tokens (no anonymous connections)');
+    return;
+  }
+
+  const instance = $('probe-instance').value.trim();
+  const hubUrl = base() + '/realtime/hub' + (instance ? `?instance=${encodeURIComponent(instance)}` : '');
+  const fp = token.access_token.slice(0, 8) + '…' + token.access_token.slice(-6);   // never log the full JWT
+  pLog('lg', `negotiate → ${hubUrl}`);
+  pLog('lg', `Authorization: Bearer ${fp} (sub=${claims.sub}, client_id=${claims.client_id ?? '—'})`);
+
+  const conn = new signalR.HubConnectionBuilder()
+    .withUrl(hubUrl, {
+      transport: signalR.HttpTransportType.WebSockets,   // server is websockets-only
+      accessTokenFactory: () => token.access_token,      // → negotiate carries Bearer; server mints the connection JWT
+    })
+    .configureLogging({
+      log: (level, message) => {
+        const name = signalR.LogLevel[level] ?? level;
+        if (level >= signalR.LogLevel.Warning) pLog('lg-err', `[signalr:${name}] ${message}`);
+        else pLog('lg', `[signalr:${name}] ${message}`);
+      },
+    })
+    .build();
+
+  conn.on('event', watchEnvelope);
+  conn.onreconnecting(err => {
+    pState('reconnecting…', 'warn');
+    pLog('lg-err', `reconnecting: ${err?.message ?? 'connection lost'}`);
+  });
+  conn.onreconnected(id => { pState('connected', 'ok'); pLog('lg-ok', `reconnected — connectionId=${id ?? '—'}`); });
+  conn.onclose(err => {
+    probe = null;
+    pState('offline', 'warn'); $('btn-probe-connect').disabled = false; $('btn-probe-disconnect').disabled = true;
+    pLog('lg', err ? `closed: ${err.message ?? String(err)}` : 'closed (clean)');
+  });
+
+  pState('connecting…', 'warn');
+  $('btn-probe-connect').disabled = true;
+  try {
+    await conn.start();
+    probe = conn;
+    pState('connected', 'ok');
+    $('btn-probe-disconnect').disabled = false;
+    pLog('lg-ok', `connected as sub=${claims.sub} — membership re-applied, joined user_channel|${claims.sub ?? '—'}`);
+    pLog('lg', 'waiting for envelopes; use the API actions (or add this sub as a group member) to see traffic');
+  } catch (e) {
+    pState('failed', 'err'); $('btn-probe-connect').disabled = false;
+    pLog('lg-err', `start failed: ${e?.message ?? String(e)}`);
+  }
+}
+
+async function probeDisconnect() {
+  if (!probe) return;
+  try { await probe.stop(); } catch (e) { pLog('lg-err', `stop failed: ${e?.message ?? e}`); }
+}
+
+/* ── wiring ────────────────────────────────────────────────────────────── */
+$('f-action').innerHTML = ROUTES.map(r => `<option value="${r.id}">${esc(r.label)} — ${r.m} ${esc(r.p)}</option>`).join('');
+$('f-action').addEventListener('change', renderFields);
+document.querySelectorAll('[id^=f-]').forEach(el => el.addEventListener('change', preview));
+$('fields').addEventListener('input', preview);
+try { setToken(JSON.parse(localStorage.getItem('rt-tester-token') || 'null')?.access_token); } catch { token = null; }
+$('btn-mint').addEventListener('click', mint);
+$('btn-paste').addEventListener('click', () => { if ($('f-manual-token').value.trim()) { setToken($('f-manual-token').value.trim()); $('f-manual-token').value = ''; } });
+$('btn-clear').addEventListener('click', () => { token = null; localStorage.removeItem('rt-tester-token'); showToken(); });
+$('btn-send').addEventListener('click', () => runSend());
+document.addEventListener('keydown', e => { if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') runSend(); });
+load();
+renderFields();
+showToken();
+preview();
+
+// bus probe wiring
+$('btn-probe-connect').addEventListener('click', probeConnect);
+$('btn-probe-disconnect').addEventListener('click', probeDisconnect);
+$('btn-probe-copy').addEventListener('click', () => {
+  if (!probeConnId) { pLog('lg-err', 'no connection_id captured yet — connect and wait for connection_registered'); return; }
+  navigator.clipboard?.writeText(probeConnId).then(
+    () => pLog('lg', `copied ${probeConnId}`),
+    () => pLog('lg-err', `copy failed — id: ${probeConnId}`));
+});
+$('btn-probe-clear').addEventListener('click', () => { $('probe-log').textContent = 'cleared.'; });
+</script>
+</body>
+</html>
