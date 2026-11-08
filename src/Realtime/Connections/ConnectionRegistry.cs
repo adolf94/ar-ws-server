@@ -50,12 +50,21 @@ public interface IConnectionRegistry
     /// <c>GET /api/users/{sub}/connections</c>. Includes boundless persistent
     /// (tagged) ids: they are live addresses even with zero sockets.</summary>
     IReadOnlyCollection<ConnectionSnapshot> SnapshotsFor(string identityKey);
+
+    /// <summary>EVERY bound logical connection in the process — the
+    /// cross-partition operator inventory that backs <c>GET /api/connections</c>.
+    /// Deliberately ignores the partition wall: CONTRACT §4 exception (owner
+    /// decision 2026-11-08, second after the global unicast lane) —
+    /// see the endpoint's contract notes for the information-leak caveat.</summary>
+    IReadOnlyCollection<ConnectionSnapshot> Snapshots();
 }
 
-/// <summary>One logical connection in a partition inventory (v1.1 additive
-/// read, 2026-11-08): the server-minted id, its instance tag (null when the
-/// id is per-socket legacy semantics), and its live socket count.</summary>
-public sealed record ConnectionSnapshot(string ConnectionId, string? InstanceTag, bool Persistent, int Sockets);
+/// <summary>One logical connection in a connection inventory (v1.1 additive
+/// reads, 2026-11-08): the owner identity key, the server-minted id, its
+/// instance tag (null when the id is per-socket legacy semantics), and its
+/// live socket count. The owner key decodes via
+/// <see cref="Realtime.Groups.IGroupPartitioner"/> in the endpoints.</summary>
+public sealed record ConnectionSnapshot(string OwnerKey, string ConnectionId, string? InstanceTag, bool Persistent, int Sockets);
 
 public sealed class InMemoryConnectionRegistry : IConnectionRegistry
 {
@@ -161,15 +170,23 @@ public sealed class InMemoryConnectionRegistry : IConnectionRegistry
     public IReadOnlyCollection<ConnectionSnapshot> SnapshotsFor(string identityKey) =>
         [.. _byLogical
             .Where(kv => kv.Value.OwnerKey == identityKey)
-            .Select(kv =>
-            {
-                var entry = kv.Value;
-                // tagged entries store the escaped tag after the owner key's
-                // '|' — same discipline Bind used to build the instance key
-                var tag = entry.Persistent
-                    ? Uri.UnescapeDataString(entry.InstanceKey[(identityKey.Length + 1)..])
-                    : null;
-                return new ConnectionSnapshot(kv.Key, tag, entry.Persistent, entry.Sockets.Count);
-            })
+            .Select(kv => SnapshotOf(kv.Key, kv.Value))
             .OrderBy(c => c.ConnectionId, StringComparer.Ordinal)];   // uuidv7 → mint order
+
+    public IReadOnlyCollection<ConnectionSnapshot> Snapshots() =>
+        [.. _byLogical
+            .Select(kv => SnapshotOf(kv.Key, kv.Value))
+            .OrderBy(c => c.OwnerKey, StringComparer.Ordinal)
+            .ThenBy(c => c.ConnectionId, StringComparer.Ordinal)];
+
+    private ConnectionSnapshot SnapshotOf(string connectionId, ConnectionEntry entry)
+    {
+        // tagged entries store the escaped tag after the owner key's '|' —
+        // same discipline Bind used to build the instance key; untagged
+        // entries (per-socket ids) have no stable tag to show
+        var tag = entry.Persistent
+            ? Uri.UnescapeDataString(entry.InstanceKey[(entry.OwnerKey.Length + 1)..])
+            : null;
+        return new ConnectionSnapshot(entry.OwnerKey, connectionId, tag, entry.Persistent, entry.Sockets.Count);
+    }
 }

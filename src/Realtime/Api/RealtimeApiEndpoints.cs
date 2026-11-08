@@ -265,6 +265,31 @@ public static class RealtimeApiEndpoints
                 });
             });
 
+        // ── GET /api/connections — CROSS-PARTITION operator inventory
+        // (2026-11-08): every logical connection in the process, REGARDLESS
+        // of client_id. Second deliberate exception to the partition wall
+        // (CONTRACT §4, after the global unicast lane): rows carry each
+        // connection's owning client_id + user_id, so callers see identities
+        // ACROSS partitions — an ops surface, not a scoped app read.
+        // Publisher-scope gated (every row is sensitive); rows are
+        // server-internal state that dies with the process (§2.2), so this
+        // must stay internal-network-only alongside /metrics.
+        endpoints.MapGet("/connections",
+            [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
+            (IConnectionRegistry connections, IGroupPartitioner partitioner) =>
+            {
+                var all = connections.Snapshots().Select(c => new
+                {
+                    connection_id = c.ConnectionId,
+                    client_id = partitioner.IdentityPartition(c.OwnerKey),
+                    user_id = partitioner.IdentitySubject(c.OwnerKey),
+                    instance_tag = c.InstanceTag,   // null = untagged per-socket id (legacy semantics)
+                    persistent = c.Persistent,      // tagged: the id survives reconnect (boundless still)
+                    sockets = c.Sockets,            // 0 = known but currently boundless
+                }).ToList();
+                return Results.Ok(new { ok = true, count = all.Count, connections = all });
+            });
+
         // ── POST /api/connections/{id}/disconnect — force-close a logical
         // connection (plan §5.3, v1.1: the id is the server-minted,
         // reconnect-stable UUIDv7; every socket currently bound to it is
