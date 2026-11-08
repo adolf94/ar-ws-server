@@ -75,6 +75,13 @@ public static class RealtimeApiEndpoints
     private static RouteGroupBuilder MapEndpoints(this IEndpointRouteBuilder app)
     {
         var endpoints = app.MapGroup("");
+        // diagnostics: the per-connection 403/404 branches deliberately log the
+        // partition mismatch server-side (a silent rejection cost real
+        // debugging time once v1.1's minted ids landed; 2026-11-08). The
+        // RESPONSE envelopes stay unchanged — Partition Forensics are
+        // server-internal only.
+        var lanes = app.ServiceProvider.GetRequiredService<ILoggerFactory>()
+            .CreateLogger("Realtime.SendLanes");
         endpoints.RequireRateLimiting("partitioned");   // §9 fixed-window per client_id
 
         endpoints.MapPost("/publish",
@@ -189,6 +196,39 @@ public static class RealtimeApiEndpoints
                 return Results.Ok(new { ok = true, group, group_partition = partition, presence });
             });
 
+        // ── GET /api/users/{sub}/connections — v1.1 additive read
+        // (2026-11-08): the caller's partition's logical connections for one
+        // user, i.e. the INVENTORY side of the scoped per-connection lanes.
+        // The ids are otherwise server-internal — CONTRACT §2.2 delivers
+        // them only to the owning client — so an ops surface needs a
+        // partition-scoped way to discover which connection_id to feed
+        // POST /api/connections/{id}/send|disconnect. Unknown or foreign
+        // users yield an EMPTY list (never 404/403): the caller learns
+        // nothing about users outside its own client_id partition.
+        endpoints.MapGet("/users/{sub}/connections",
+            [Authorize(AuthenticationSchemes = AuthSchemes.Idp, Policy = "publisher")]
+            (string sub, HttpContext http, IConnectionRegistry connections, IGroupPartitioner partitioner) =>
+            {
+                if (string.IsNullOrWhiteSpace(sub))
+                    return Results.BadRequest(new { error = "user_id_required", detail = "route user_id (sub) is required" });
+
+                var partition = partitioner.PartitionOf(http.User);
+                var snapshot = connections.SnapshotsFor(partitioner.Physical(partition, sub));
+                return Results.Ok(new
+                {
+                    ok = true,
+                    user_id = sub,
+                    partition,
+                    connections = snapshot.Select(c => new
+                    {
+                        connection_id = c.ConnectionId,
+                        instance_tag = c.InstanceTag,   // null = untagged per-socket id (legacy semantics)
+                        persistent = c.Persistent,      // tagged: the id survives reconnect (boundless still)
+                        sockets = c.Sockets,            // 0 = known but currently boundless
+                    }),
+                });
+            });
+
         // ── POST /api/connections/{id}/disconnect — force-close a logical
         // connection (plan §5.3, v1.1: the id is the server-minted,
         // reconnect-stable UUIDv7; every socket currently bound to it is
@@ -207,9 +247,14 @@ public static class RealtimeApiEndpoints
 
                 var partition = partitioner.PartitionOf(http.User);
                 if (partitioner.IdentityPartition(identityKey) != partition)
+                {
+                    lanes.LogWarning(
+                        "disconnect-connection {ConnectionId}: caller partition={CallerPartition} != owner partition={OwnerPartition} (owner={OwnerKey}) — 403",
+                        id, partition, partitioner.IdentityPartition(identityKey), identityKey);
                     return Results.Json(
                         new { error = "connection_not_in_partition", detail = "target connection belongs to another client_id partition" },
                         statusCode: StatusCodes.Status403Forbidden);
+                }
 
                 var aborted = connections.SocketsFor(id).Count(aborts.TryAbort);
                 return Results.Ok(new { ok = true, connection_id = id, connection_partition = partition, aborted });
@@ -312,20 +357,31 @@ public static class RealtimeApiEndpoints
                     return Results.BadRequest(new { error = "data_invalid", detail = "body.data must be a JSON value" });
 
                 if (!connections.TryGetOwner(id, out var identityKey))
+                {
+                    lanes.LogDebug("send-to-connection {ConnectionId}: unknown id (404 connection_not_found)", id);
                     return Results.NotFound(new { error = "connection_not_found", detail = "no live connection with this id in this process" });
+                }
 
                 var partition = partitioner.PartitionOf(http.User);
                 if (partitioner.IdentityPartition(identityKey) != partition)
+                {
+                    lanes.LogWarning(
+                        "send-to-connection {ConnectionId}: caller partition={CallerPartition} != owner partition={OwnerPartition} (owner={OwnerKey}) — 403",
+                        id, partition, partitioner.IdentityPartition(identityKey), identityKey);
                     return Results.Json(
                         new { error = "connection_not_in_partition", detail = "target connection belongs to another client_id partition" },
-                        statusCode: StatusCodes.Status403Forbidden);   // scoped per owner, 2026-11-07
+                        statusCode: StatusCodes.Status403Forbidden);
+                }   // scoped per owner, 2026-11-07
 
                 data["from"] = (string?)http.User.GetClientId() ?? "server";
                 data["sent_at"] = DateTime.UtcNow.ToString("o");
 
                 var sockets = connections.SocketsFor(id);
                 if (sockets.Count == 0)
+                {
+                    lanes.LogDebug("send-to-connection {ConnectionId}: known id, zero live sockets (404 connection_not_connected; reconnect pending)", id);
                     return Results.NotFound(new { error = "connection_not_connected", detail = "logical id is known but has no live sockets (reconnect pending)" });
+                }
                 await hubContext.Clients.Clients(sockets).SendAsync("event", data);
                 return Results.Ok(new { ok = true, connection_id = id, connection_partition = partition, delivered = sockets.Count });
             });

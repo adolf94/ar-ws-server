@@ -142,6 +142,28 @@
         }
       }
     },
+    "/api/users/{sub}/connections": {
+      "get": {
+        "tags": [
+          "Realtime"
+        ],
+        "parameters": [
+          {
+            "name": "sub",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/api/groups/{group}/history": {
       "get": {
         "tags": [

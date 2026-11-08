@@ -60,7 +60,7 @@ Three addresses with three lifetimes:
 | Address | Scope | Lifetime | Reached via |
 |---|---|---|---|
 | **`socket_id`** | one live transport socket | dies with the socket; **changes on every reconnect** (each reconnect re-negotiates) | never — server-internal (logs/diagnostics only) |
-| **`connection_id`** | one logical client instance | survives client reconnects; dies on server restart (a new id is minted after) | `POST /api/connections/{id}/send`, `POST /api/connections/{id}/disconnect`, and its connect-time envelope |
+| **`connection_id`** | one logical client instance | survives client reconnects; dies on server restart (a new id is minted after) | `POST /api/connections/{id}/send`, `POST /api/connections/{id}/disconnect`, `GET /api/users/{sub}/connections` (own partition), and its connect-time envelope |
 | **`user_id` (`sub`)** | the person, every tab/device at once | lives as long as the JWT identity | `user_channel\|{sub}`, `POST /api/users/{sub}/send` |
 
 * `connection_id` is **server-minted (UUIDv7, time-ordered)** at first connect to
@@ -133,6 +133,7 @@ Entry points: python `coalesced_send_to_user(sub)` / `coalesced_send_to_connecti
 | `DELETE /api/groups/{g}/members?user_id=` | Bearer+scope | — | `{ok, group, group_partition, member{…}, removed}` | 404 group_not_found |
 | `GET /api/groups` | Bearer | — | `{ok, partition, groups:[{group, members, online}]}` | — |
 | `GET /api/groups/{g}/presence` | Bearer | — | `{ok, group, group_partition, presence:[{user_id, client_id, online, connections}]}` | 404 group_not_found |
+| `GET /api/users/{sub}/connections` | Bearer+scope | — | `{ok, user_id, partition, connections:[{connection_id, instance_tag, persistent, sockets}]}` — the caller's partition's logical connections for one user (the inventory for the per-connection lanes); ordered oldest-first (uuidv7). Unknown/foreign users → empty list (no existence leak) | — |
 | `GET /api/groups/{g}/history?limit=` | Bearer+scope | `?limit` (1..10 000, default 100) | `{ok, group, group_partition, history_enabled, total, history:[event…]}` — ascending tail over non-expired entries | 404 group_not_found |
 | `DELETE /api/groups/{g}/history` | Bearer+scope | — | `{ok, group, group_partition, cleared}` (disabled buffer → `cleared:0`) | 404 group_not_found |
 | `GET /healthz` / `GET /openapi/v1.json` | none | — | config probe / spec | — |

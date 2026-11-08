@@ -44,7 +44,18 @@ public interface IConnectionRegistry
     /// <summary>The identity key (<c>{client_id}|{sub}</c>) owning a logical
     /// id — the partition check for connection-scoped endpoints.</summary>
     bool TryGetOwner(string connectionId, out string ownerKey);
+
+    /// <summary>Bound logical connections owned by an identity key
+    /// (<c>{client_id}|{sub}</c>) — the partition-scoped inventory that backs
+    /// <c>GET /api/users/{sub}/connections</c>. Includes boundless persistent
+    /// (tagged) ids: they are live addresses even with zero sockets.</summary>
+    IReadOnlyCollection<ConnectionSnapshot> SnapshotsFor(string identityKey);
 }
+
+/// <summary>One logical connection in a partition inventory (v1.1 additive
+/// read, 2026-11-08): the server-minted id, its instance tag (null when the
+/// id is per-socket legacy semantics), and its live socket count.</summary>
+public sealed record ConnectionSnapshot(string ConnectionId, string? InstanceTag, bool Persistent, int Sockets);
 
 public sealed class InMemoryConnectionRegistry : IConnectionRegistry
 {
@@ -146,4 +157,19 @@ public sealed class InMemoryConnectionRegistry : IConnectionRegistry
         ownerKey = string.Empty;
         return _byLogical.TryGetValue(connectionId, out var entry) && (ownerKey = entry.OwnerKey) is not null;
     }
+
+    public IReadOnlyCollection<ConnectionSnapshot> SnapshotsFor(string identityKey) =>
+        [.. _byLogical
+            .Where(kv => kv.Value.OwnerKey == identityKey)
+            .Select(kv =>
+            {
+                var entry = kv.Value;
+                // tagged entries store the escaped tag after the owner key's
+                // '|' — same discipline Bind used to build the instance key
+                var tag = entry.Persistent
+                    ? Uri.UnescapeDataString(entry.InstanceKey[(identityKey.Length + 1)..])
+                    : null;
+                return new ConnectionSnapshot(kv.Key, tag, entry.Persistent, entry.Sockets.Count);
+            })
+            .OrderBy(c => c.ConnectionId, StringComparer.Ordinal)];   // uuidv7 → mint order
 }
