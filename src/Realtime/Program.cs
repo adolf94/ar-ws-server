@@ -127,6 +127,9 @@ builder.Services.AddCors(options => options.AddPolicy("origin-fence", policy => 
     .SetIsOriginAllowed(originAllowList.IsAllowed)
     .AllowAnyHeader()
     .AllowAnyMethod()
+    .AllowCredentials()          // SignalR JS client negotiates with credentials mode 'include':
+                                 // the preflight MUST answer Access-Control-Allow-Credentials: true
+                                 // or the browser blocks before the fence ever sees the request
     .SetPreflightMaxAge(TimeSpan.FromMinutes(10))));
 
 // ── API surface (plan §5.3) ─────────────────────────────────────────────────
