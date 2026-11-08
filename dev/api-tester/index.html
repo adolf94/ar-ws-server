@@ -135,6 +135,8 @@
         <button id="btn-probe-scan" class="small">Scan SPA session storage</button>
         <span id="probe-jwt-status" class="warn">override: none → minted token</span>
       </div>
+      <label>partition override (?partition= — connect into a partition the token's aud contains)</label>
+      <input id="probe-partition" placeholder="e.g. finance-app-api (must appear in the token's aud claim)">
       <label>instance tag (?instance= — stable self-label; reconnect rebinds the same connection_id)</label>
       <input id="probe-instance" placeholder="e.g. ui-probe-1 (empty = per-socket id, fresh every reconnect)">
       <div class="check">
@@ -524,9 +526,15 @@ async function probeConnect() {
   }
 
   const instance = $('probe-instance').value.trim();
-  const hubUrl = base() + '/realtime/hub' + (instance ? `?instance=${encodeURIComponent(instance)}` : '');
+  const partition = $('probe-partition').value.trim();
+  const params = new URLSearchParams();
+  if (instance) params.set('instance', instance);
+  if (partition) params.set('partition', partition);   // CONTRACT §1 alias — server allowlist + aud gate it
+  const qs = params.toString();
+  const hubUrl = base() + '/realtime/hub' + (qs ? `?${qs}` : '');
   const fp = raw.slice(0, 8) + '…' + raw.slice(-6);   // never log the full JWT
   pLog('lg', `negotiate → ${hubUrl}`);
+  if (partition) pLog('lg', `partition override: ${partition} — connection JWT will carry client_id=${partition} (bus plane); the token itself stays ${claims.client_id ?? '—'}`);
   pLog('lg', `Authorization: Bearer ${fp}  [${source}] (sub=${claims.sub}, client_id=${claims.client_id ?? '—'})`);
 
   const conn = new signalR.HubConnectionBuilder()

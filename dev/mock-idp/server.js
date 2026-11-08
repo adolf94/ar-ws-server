@@ -123,12 +123,12 @@ function signRS256(signingInput) {
     .toString('base64url');
 }
 
-function issueAccessToken({ sub = '42', scope = 'realtime:connect realtime:publish', client_id = 'spa-demo-client' }) {
+function issueAccessToken({ sub = '42', scope = 'realtime:connect realtime:publish', client_id = 'spa-demo-client', aud = AUDIENCE }) {
   const iat = Math.floor(Date.now() / 1000);
   const header = { alg: 'RS256', typ: 'JWT', kid: JWK.kid };
   const claims = {
     iss: ISSUER, // MUST match Centrifugo client.token.issuer
-    aud: AUDIENCE, // MUST match Centrifugo client.token.audience
+    aud, // audience the caller requested (default = the pair's registered one); array = SPA joint-audience shape for the partition-alias gates
     sub, // Centrifugo user ID (non-empty -> authenticated connection)
     iat,
     nbf: iat,
@@ -252,6 +252,7 @@ const server = http.createServer(async (req, res) => {
         sub: String(body.sub || '42'),
         scope: granted.join(' '),
         client_id: String(body.client_id || 'spa-demo-client'),
+        aud: body.aud ?? AUDIENCE, // optional override (string or array) — partition-alias conformance mints joint audiences
       });
       console.log(
         `[auth-server] issued token sub="${body.sub || '42'}" client_id="${body.client_id || 'spa-demo-client'}" scopes="${response.scope}"`

@@ -44,6 +44,36 @@ export interface RealtimeHubOptions {
    */
   onReconnected?: (connectionId: string | null) => void;
   logLevel?: LogLevel;
+  /**
+   * Stable instance self-label (CONTRACT §2.2) — CLIENT-SET by design, and
+   * never security-relevant: the fence keeps identity inside the connection
+   * JWT; a forged tag only addresses a sibling socket of the same sub.
+   * Semantics: same tag → the server re-binds the SAME logical
+   * connection_id across reconnects (stale sockets superseded); no tag →
+   * fresh per-socket id on every reconnect.
+   *   * `true`  → the SDK generates a UUID and persists it in
+   *               localStorage (`realtime-instance-tag`) in the browser, or
+   *               holds a per-process UUID in Node — reconnects from the
+   *               same tab/process keep their id.
+   *   * string  → used verbatim (e.g. the SPA's own stored UUID).
+   *   * absent  → legacy per-socket behavior.
+   */
+  instanceTag?: string | boolean;
+  /**
+   * Connect-time partition alias (CONTRACT §1, additive 2026-11-08) —
+   * appended to the hub URL as `?partition=` for EVERY negotiate (merged
+   * into the query alongside `?instance=`, preserved across
+   * re-negotiates). Granted by the server only when the verified token's
+   * `aud` contains the requested partition: aud issuance at the IdP is the
+   * control surface — point this at the RESOURCE audience your token
+   * already carries (e.g. the backend's client, `finance-app-api`) to land
+   * the connection in that partition so its group memberships apply to
+   * this socket. The bus plane (hub identity/memberships) uses the alias;
+   * the REST plane keeps the real token's client_id. Rejection surfaces as
+   * a failed start(): 403 `partition_not_in_token` (aud miss) or
+   * `partition_not_allowed` (reserved pseudo-partition, e.g. user_channel).
+   */
+  partition?: string;
 }
 
 export interface RealtimeHubDisposable {
@@ -105,7 +135,7 @@ export class RealtimeHubClient {
 
     // negotiate IS the auth entry point (docs/INTEGRATION.md §2) — never skip.
     const builder = new HubConnectionBuilder()
-      .withUrl(this.options.url, {
+      .withUrl(this.hubUrl(), {
         accessTokenFactory: this.options.tokenFactory,
         transport: HttpTransportType.WebSockets, // WS-only upstream (docs/TECH.md)
         // both names: Node lane merges options.headers over the stock UA on
@@ -146,6 +176,19 @@ export class RealtimeHubClient {
     return this.options.userAgent ?? `Microsoft SignalR/10 (via ${USER_AGENT})`;
   }
 
+  /** hub URL with SDK-managed riders merged into the query (CONTRACT §1/§2.2):
+   *  `partition` (aud-gated alias) and `instance` (client-set self-label) —
+   *  set via searchParams so caller-supplied params (incl. pre-existing
+   *  `?instance=`) survive instead of being clobbered. */
+  private hubUrl(): string {
+    const url = new URL(this.options.url); // absolute hub URL is the documented shape
+    const alias = this.options.partition;
+    if (alias && alias.length > 0) url.searchParams.set("partition", alias);
+    const tag = resolveInstanceTag(this.options.instanceTag);
+    if (tag) url.searchParams.set("instance", tag);
+    return url.toString();
+  }
+
   private envelope(raw: unknown): RealtimeEvent | null {
     if (typeof raw !== "object" || raw === null) return null;
     const record = raw as Record<string, unknown>;
@@ -182,4 +225,33 @@ export class RealtimeHubClient {
 /** small factory (idiomatic with signalr one-liners) */
 export function createRealtimeHub(options: RealtimeHubOptions): RealtimeHubClient {
   return new RealtimeHubClient(options);
+}
+
+/* ── instance tag resolution (CONTRACT §2.2, client-set self-label) ─────── */
+const INSTANCE_STORAGE_KEY = "realtime-instance-tag";
+
+const hasLocalStorage = typeof localStorage !== "undefined";
+const hasNetworkUuid =
+  typeof crypto !== "undefined" && typeof crypto.randomUUID === "function";
+const moduleTag: string | null =
+  hasNetworkUuid ? crypto.randomUUID() : null; // Node fallback: stable per process
+
+function resolveInstanceTag(option?: string | boolean): string | null {
+  if (option === true) {
+    if (hasLocalStorage) {
+      try {
+        const existing = localStorage.getItem(INSTANCE_STORAGE_KEY);
+        if (existing) return existing;
+        const fresh = hasNetworkUuid ? crypto.randomUUID() : null;
+        if (fresh) {
+          localStorage.setItem(INSTANCE_STORAGE_KEY, fresh);
+          return fresh;
+        }
+      } catch {
+        return moduleTag; // storage blocked → per-process fallback
+      }
+    }
+    return moduleTag; // Node: per-process tag (survives reconnects, not restarts)
+  }
+  return typeof option === "string" && option.length > 0 ? option : null;
 }

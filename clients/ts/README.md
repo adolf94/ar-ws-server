@@ -52,6 +52,23 @@ const hub = createRealtimeHub({
 * `from` and `sent_at` are stamped server-side.
 * Handlers should route on `type` and ignore unrecognized message types for forward compatibility.
 
+## Partition Alias (connect into a backend partition)
+
+For the SPA-vs-backend client split (CONTRACT §1, additive 2026-11-08): a user token issued for your SPA client that **also audiences the backend's resource** can land its connection in the backend's partition, so backend-added group memberships apply to that socket.
+
+```ts
+const hub = createRealtimeHub({
+  url: 'https://realtime.example.com/realtime/hub',   // alias merges into the query
+  tokenFactory: () => auth.getUser().then((u) => u.access_token),
+  partition: 'finance-app-api',   // must appear in the token's aud claim
+});
+```
+
+* The alias rides as `?partition=finance-app-api` on every negotiate (co-exists with `?instance=`), and survives re-negotiates.
+* The **bus plane** (hub identity, group memberships, socket ops) uses the aliased partition; the **REST plane** keeps the token's real `client_id`.
+* Rejection: `start()` fails with 403 — `partition_not_in_token` (aud miss) or `partition_not_allowed` (reserved pseudo-partition).
+* The control surface is IdP audience issuance: remove the audience grant, close the door — no server changes.
+
 ## User-Agent & Cloudflare Handling
 
 To avoid triggering bot mitigations against default SignalR user agent strings, this client emits `realtime-client-ts/<version>`:
@@ -63,6 +80,6 @@ To avoid triggering bot mitigations against default SignalR user agent strings, 
 
 * **Token Negotiation**: `tokenFactory` runs on every initial connect and reconnection. Always return a fresh IdP token; connection JWTs expire within 5 minutes.
 * **Negotiation Gate**: Never set `skipNegotiation: true`, as negotiation performs required authentication.
-* **Connection id**: `hub.connectionId` is the server-minted **logical** connection id (CONTRACT §2.2/§5 — NOT SignalR's transport socket id), captured from the server-published `connection_registered` envelope; it is `null` until that envelope lands, so read it after `await hub.start()`, e.g. `const address = hub.connectionId; // backends use it for POST /api/connections/{id}/send and disconnect-by-id`. The underlying socket id changes on every reconnect; the logical id survives reconnects when the hub url carries `?instance=<stable tag>` (a UUID persisted in `localStorage` / process env) — untagged, re-read `connectionId` after reconnecting or pass an `onReconnected(id)` option, which fires exactly once when the fresh envelope lands after an auto-reconnect (not on the first `start()`).
+* **Connection id**: `hub.connectionId` is the server-minted **logical** connection id (CONTRACT §2.2/§5 — NOT SignalR's transport socket id), captured from the server-published `connection_registered` envelope; it is `null` until that envelope lands, so read it after `await hub.start()`, e.g. `const address = hub.connectionId; // backends use it for POST /api/connections/{id}/send and disconnect-by-id`. The underlying socket id changes on every reconnect; the logical id survives reconnects when the connection carries an instance tag — the CLIENT-SET self-label (§2.2, never security-relevant): set `instanceTag: true` (the SDK persists a UUID in `localStorage` / keeps one per process) or `instanceTag: '<your stored uuid>'`; a pre-existing `?instance=` in the URL is honored as-is. Untagged sockets get a fresh per-socket id each reconnect — re-read `connectionId` after reconnecting or pass an `onReconnected(id)` option, which fires exactly once when the fresh envelope lands after an auto-reconnect (not on the first `start()`).
 * **Delivery**: Delivery is once per active connected receiver at send time. Backend-managed group memberships are automatically re-applied upon reconnect.
 * **Reconnect Backoff**: Default retry intervals are `[0, 3000, 6000, 12000, 24000]` ms.

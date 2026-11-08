@@ -11,6 +11,12 @@
 //   HUB-4b  subscriber exceptions are contained (hub alive, later events flow)
 //   HUB-5   stop() idempotent; restart re-negotiates, provisioning re-applied
 //   UA-1    negotiate/WS lanes carry OUR User-Agent (local echo capture)
+//   PART-1  hubUrl merge: SDK riders (partition + instance options)
+//           co-exist with caller params (local echo capture — CONTRACT §1/§2.2)
+//   PART-2  live alias: token aud contains the partition → connection lands in
+//           the partition; backend membership applies; publish delivers
+//   PART-3  live negative: partition missing from the token's aud → negotiate
+//           rejects (start() fails; 403 partition_not_in_token)
 
 import { createRealtimeHub, USER_AGENT, LIB_VERSION } from '../dist/index.js';
 
@@ -162,6 +168,91 @@ await hub.stop();
   check('UA-1. negotiate User-Agent is ours (Cloudflare-safe), not stock SignalR',
     (ua ?? '').includes(USER_AGENT), `user-agent=${JSON.stringify(ua)}`);
   echo.close();
+}
+
+// PART-1: local echo captures the negotiate URL — SDK riders (partition
+// alias + instance tag) must MERGE into the query, not clobber caller params
+{
+  const http = await import('node:http');
+  let negotiatePath = null;
+  const echo = http.createServer((req, res) => {
+    if ((req.url ?? '').includes('/negotiate')) negotiatePath = req.url;
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({
+      connectionId: 'echo-id',
+      connectionToken: 'echo-token',
+      negotiateVersion: 1,
+      availableTransports: [{ transport: 'WebSockets', transferFormats: ['Text', 'Binary'] }],
+    }));
+  });
+  await new Promise((r) => echo.listen(0, '127.0.0.1', r));
+  const echoUrl = `http://127.0.0.1:${echo.address().port}`;
+  const echoHub = createRealtimeHub({
+    url: `${echoUrl}/realtime/hub?vendor=keep-me`,   // caller param must survive
+    tokenFactory: async () => 'echo',
+    partition: 'finance-app-api',
+    instanceTag: 'probe-tag',                        // SDK riders: partition + instance
+  });
+  await echoHub.start().catch(() => {});   // the echo can't upgrade — fine
+  await echoHub.stop();                    // stop() is idempotent even when start() failed
+  check('PART-1. negotiate URL carries SDK riders (partition + instance) alongside caller params',
+    (negotiatePath ?? '').includes('partition=finance-app-api')
+      && (negotiatePath ?? '').includes('instance=probe-tag')
+      && (negotiatePath ?? '').includes('vendor=keep-me'),
+    `negotiate URL=${JSON.stringify(negotiatePath)}`);
+  echo.close();
+}
+
+// PART-2/3: LIVE alias gates against the running server (CONTRACT §1)
+{
+  // positive: joint-audience token ('realtime' + the publisher's partition)
+  // mirrors the SPA shape — user token that also audiences the backend
+  const aliasToken = await mintMock({
+    sub: USER_SUB, scope: 'realtime:connect', client_id: 'spa-demo-client',
+    aud: ['realtime', 'spa-demo-client'],
+  });
+  const aliasHub = createRealtimeHub({
+    url: `${SRV}/realtime/hub?instance=ts-partition-alias`,  // tagged: rebind across reconnects
+    tokenFactory: async () => aliasToken,
+    partition: 'spa-demo-client',
+  });
+  let aliasedText = null;
+  aliasHub.on('chat_receive', (e) => { if (e.text === 'delivered through the alias') aliasedText = e.text; });
+  await aliasHub.start();
+  check('PART-2a. aliased negotiate accepted (aud contains the partition)',
+    aliasHub.state === 'connected', `state=${aliasHub.state}`);
+
+  // backend provisions the aliased identity: same client_id partition
+  await fetch(`${SRV}/api/groups`, {
+    method: 'POST', headers: authHdrs, body: JSON.stringify({ name: 'ts-partition-alias' }),
+  });
+  const member = await fetch(`${SRV}/api/groups/ts-partition-alias/members`, {
+    method: 'POST', headers: authHdrs, body: JSON.stringify({ user_id: USER_SUB }),
+  });
+  await fetch(`${SRV}/api/publish`, {
+    method: 'POST', headers: authHdrs,
+    body: JSON.stringify({
+      group: 'ts-partition-alias',
+      data: { type: 'chat_receive', text: 'delivered through the alias' },
+    }),
+  });
+  await new Promise((r) => setTimeout(r, 900));
+  check('PART-2b. aliased socket received backend publish (bus plane = aliased partition)',
+    aliasedText === 'delivered through the alias' && member.status === 200,
+    `text=${JSON.stringify(aliasedText)} member-add=${member.status}`);
+  await aliasHub.stop();
+
+  // negative: partition NOT in the token's aud → negotiate rejects, start fails
+  const plainToken = await mintMock({ sub: '43', scope: 'realtime:connect', client_id: 'spa-demo-client' });
+  const negativeHub = createRealtimeHub({
+    url: `${SRV}/realtime/hub`,
+    tokenFactory: async () => plainToken,
+    partition: 'spa-demo-client',   // plain aud = the pair's audience, not this partition
+  });
+  let negErr = null;
+  try { await negativeHub.start(); } catch (e) { negErr = e; }
+  check('PART-3. partition missing from aud → negotiate rejected (start fails)',
+    negErr !== null && negativeHub.state !== 'connected', `err=${String(negErr?.message ?? 'none').slice(0, 120)}`);
 }
 
 console.log(`\nts conformance: ${failures === 0 ? 'ALL PASS' : `${failures} FAILURE(S)`}`);

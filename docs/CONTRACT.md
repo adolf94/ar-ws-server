@@ -24,12 +24,26 @@ changes require **v2**. Server-side placement rules are in §4–§5.
   Reads (`GET /api/groups*`) need only a valid bearer — no scope.
 * The token's `client_id` is the partition key: it scopes groups, group listing,
   membership, and per-socket ops. It is never accepted from a request body or query.
+  * **Connect-time partition alias (additive 2026-11-08)**: negotiate accepts
+  `?partition=<client_id>`; granted iff the VERIFIED token's `aud` contains
+  the requested partition — aud is **IdP-issued**, so audience issuance at
+  the IdP is the whole control surface (which apps may join which resource
+  partition). The minted connection JWT carries the alias as its
+  `client_id` (+ a `partition_alias` claim). The **bus plane** (hub
+  identity, memberships, socket ops, `/api/connections` rows) lives in the
+  aliased partition; the **REST plane** keeps the real token's
+  `client_id`. Errors: `403 partition_not_allowed` (reserved
+  pseudo-partition, e.g. `user_channel`) / `partition_not_in_token`.
+  Motivation: an SPA token (`client_id` = SPA app, e.g. `finance-app2`)
+  audiences with the backend resource (`finance-app-api`) and may join the
+  backend's group plane without re-authing for another client.
 * Cross-service unicast (`/api/users/{sub}/send`) is the one deliberate
   exception — it addresses `user_channel|{sub}`, not a partition.
   (Additive v1.1, 2026-11-08: `GET /api/connections` reads the same
   sub-keyed plane, but ONLY the verified caller's own subject.)
 * WS lane: negotiate (`Bearer` header handshake) issues a ≤5-min
-  connection JWT — the only credential accepted at the hub path. Clients never
+  connection JWT with the connection's identity (client_id partition +
+  sub, see the partition alias above) — the only credential accepted at the hub path. Clients never
   publish on the hub (no invocable methods exist).
 
 ## 2 · Error envelope

@@ -113,6 +113,51 @@ public sealed class SecurityFenceMiddleware(RequestDelegate next, IConnectionTok
         logger.LogInformation("negotiate: verified user={User} client={ClientId}",
             idpAuth.Principal!.GetSubject(), idpAuth.Principal.GetClientId());
 
+        // ── connect-time partition alias (CONTRACT §1, additive 2026-11-08) ──
+        // negotiate ?partition=<client_id>: granted iff the VERIFIED token's
+        // aud claim contains the requested partition — aud is IdP-issued,
+        // so the operator controls which client apps may join which
+        // resource partition via audience issuance, not by server config.
+        // The minted connection JWT carries the alias as its client_id —
+        // the BUS identity plane lands there (groups, memberships, socket
+        // ops) while the REST plane keeps the real token's client_id.
+        // Closes the SPA-vs-backend client split (SPA app token audiences
+        // the backend resource → may join the backend's group plane).
+        // The reserved pseudo-partition user_channel is never grantable:
+        // aud-a misconfig must not hand out the global unicast join key.
+        string? partitionAlias = null;
+        var requestedPartition = context.Request.Query["partition"].ToString();
+        if (requestedPartition.Length > 0)
+        {
+            if (requestedPartition == Realtime.Groups.GroupPartitioner.UserChannelPartition)
+            {
+                logger.LogWarning("negotiate: partition alias {Partition} rejected — reserved pseudo-partition",
+                    requestedPartition);
+                await WriteJson(context, StatusCodes.Status403Forbidden, new JsonObject
+                {
+                    ["error"] = "partition_not_allowed",
+                    ["detail"] = "the requested partition is reserved and cannot be joined",
+                });
+                return;
+            }
+            var inAud = idpAuth.Principal.FindAll("aud").Any(c =>
+                string.Equals(c.Value, requestedPartition, StringComparison.Ordinal));
+            if (!inAud)
+            {
+                logger.LogWarning("negotiate: partition alias {Partition} rejected — token aud does not contain it",
+                    requestedPartition);
+                await WriteJson(context, StatusCodes.Status403Forbidden, new JsonObject
+                {
+                    ["error"] = "partition_not_in_token",
+                    ["detail"] = "requested partition is not in the bearer token's aud claim",
+                });
+                return;
+            }
+            partitionAlias = requestedPartition;
+            logger.LogInformation("negotiate: partition alias {Partition} granted (token aud contains it)",
+                partitionAlias);
+        }
+
         // Run SignalR's negotiate, then inject accessToken into the response.
         var originalBody = context.Response.Body;
         try
@@ -131,7 +176,7 @@ public sealed class SecurityFenceMiddleware(RequestDelegate next, IConnectionTok
                     logger.LogWarning("negotiate: could not parse SignalR's response; accessToken NOT injected");
                     return;
                 }
-                negotiateResponse["accessToken"] = tokens.Issue(context.User);
+                negotiateResponse["accessToken"] = tokens.Issue(context.User, partitionAlias);
                 var bytes = Encoding.UTF8.GetBytes(negotiateResponse.ToJsonString());
                 context.Response.ContentLength = bytes.Length;
                 await originalBody.WriteAsync(bytes);

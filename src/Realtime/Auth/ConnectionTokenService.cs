@@ -11,7 +11,7 @@ public interface IConnectionTokenService
     void Validate(ClaimsPrincipal idpPrincipal);
 
     /// <exception cref="InvalidOperationException">the IdP principal carries no usable subject.</exception>
-    string Issue(ClaimsPrincipal idpPrincipal);
+    string Issue(ClaimsPrincipal idpPrincipal, string? partitionAlias = null);
 }
 
 public sealed class ConnectionTokenService(SecurityKey signingKey, int ttlSeconds) : IConnectionTokenService
@@ -32,7 +32,7 @@ public sealed class ConnectionTokenService(SecurityKey signingKey, int ttlSecond
             throw new InvalidOperationException("negotiate principal has no usable sub claim (refusing to mint an anonymous connection token)");
     }
 
-    public string Issue(ClaimsPrincipal idpPrincipal)
+    public string Issue(ClaimsPrincipal idpPrincipal, string? partitionAlias = null)
     {
         var now = DateTimeOffset.UtcNow;
         var claims = new List<Claim>
@@ -42,9 +42,14 @@ public sealed class ConnectionTokenService(SecurityKey signingKey, int ttlSecond
             new(JwtRegisteredClaimNames.Jti, Guid.NewGuid().ToString("N")),
         };
 
-        // identity context we encrypt INTO the connection token (plan R4/R5/R6)
-        var clientId = idpPrincipal.GetClientId();
+        // identity context we encrypt INTO the connection token (plan R4/R5/R6);
+        // a connect-time partition alias (2026-11-08 — CONTRACT §1) overrides
+        // client_id here, so the BUS identity plane lands inside the aliased
+        // partition. Minted only after the fence validated the allowlist +
+        // aud; the REST plane (IdP bearer) is untouched by this claim.
+        var clientId = !string.IsNullOrEmpty(partitionAlias) ? partitionAlias : idpPrincipal.GetClientId();
         if (!string.IsNullOrEmpty(clientId)) claims.Add(new Claim("client_id", clientId));
+        if (!string.IsNullOrEmpty(partitionAlias)) claims.Add(new Claim("partition_alias", partitionAlias));
 
         var scopes = idpPrincipal.FindAll("scope").Concat(idpPrincipal.FindAll("scp"));
         var scopeList = string.Join(' ', scopes.Select(c => c.Value).Distinct(StringComparer.Ordinal));
