@@ -21,7 +21,7 @@
 #
 # Flow: GitHub Actions pushes ghcr.io/<owner>/<repo>:<sha> → gh_webhooks runs
 #   IMAGE=<sha> docker compose pull && docker compose up -d --no-deps
-#                             (manual boot: export IMAGE=realtime:latest)
+#                             (manual boot defaults to :latest)
 #
 # Variable source: the sibling `.env` next to this file (compose v2
 # auto-loads it for ${…} interpolation). No top-level `env_file:` —
@@ -29,7 +29,7 @@
 
 services:
   realtime:
-    image: '${IMAGE:? IMAGE must be set — gh_webhooks does this; manual boot: export IMAGE=…}'
+    image: ${IMAGE:-ghcr.io/adolf94/realtime:latest}
     environment:
       ASPNETCORE_ENVIRONMENT: Production
       ASPNETCORE_URLS: http://0.0.0.0:5000

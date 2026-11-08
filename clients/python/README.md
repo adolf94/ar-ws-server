@@ -23,7 +23,7 @@ with RealtimePublisher(RealtimePublisherOptions(
     publisher.create_group("approvals")
     publisher.add_member("approvals", user_sub)         # live join + persists
 
-    # reasoning stream: batch deltas per chunk (CONTACT §2.1 window: 600/min)
+    # reasoning stream: batch deltas per chunk (CONTRACT §2.1 window: 600/min)
     publisher.send_to_user(user_sub, {"type": "ai_emission", "delta": chunk})
 ```
 
@@ -51,6 +51,29 @@ No IdP minting lives here — the transport stays auth-agnostic:
   ```
   (cached until `expires_in − 60 s`, re-requesting thereafter — mirrors
   `Ar.Realtime.Client`).
+
+## Coalesced streaming (single-flight publishes)
+
+Reasoning-token lanes batch on their own: `offer()` is lock+append only, and the
+next flush fires the instant the in-flight response lands — batch size
+self-tunes to `generation_rate × RTT`, ordering guaranteed (request N+1 never
+sends before N's response):
+
+```python
+with publisher.coalesced_send_to_user(user_sub) as chunk_timeline:
+    for chunk in model_stream():          # NEVER awaits HTTP
+        chunk_timeline.offer({"type": "reclassifyThinking", "args": {...}})
+# context exit flushes the remainder; the last error propagates exactly once
+```
+
+Explicit form when you want the stats: `handle.drain()` → it raises the last
+`RealtimeApiError` of a failed batch (then re-serves idempotent stats).
+429s honor `Retry-After` and re-send the SAME batch once; the second 429 drops
+the batch (counted in `.dropped`) and the stream continues. The wire contract
+is CONTRACT §3.1: one request per flush carrying `{type, batch, batch_v: 1}`.
+`coalesced_send_to_user(user_sub, max_pending_chars=64_000)` bounds queued-but-
+unflushed memory by shedding the OLDEST chunks — freshest reasoning survives a
+burst.
 
 ## Errors & rate limiting
 

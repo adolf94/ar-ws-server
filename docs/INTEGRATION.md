@@ -4,8 +4,6 @@
 > **Audience**: Frontend/SPA engineers, mobile app developers, and backend service integrators.  
 > **Usage**: Consult for connection negotiation flows, authentication token lifetimes, event subscription code examples, group management recipes, and rate-limiting handling.
 
-Integration guide for SPA/mobile developers connecting to the SignalR *bus*, and backend services *publishing* events.
-
 Supporting documentation:
 * `docs/CONTRACT.md`: Wire contract and API specifications.
 * `docs/TECH.md`: Server architecture, middleware, and configuration.
@@ -143,6 +141,7 @@ All write requests require: `Authorization: Bearer <IdP token>` with the publish
 ### 4.3 · Event Envelopes
 
 * Set payload type in `data.type`. The server automatically stamps `from` (caller `client_id`) and `sent_at` (RFC 3339 UTC).
+* Coalesced flushes (publisher SDKs, §4.4) ride one envelope with a `batch` array — CONTRACT §3.1: `{ "type": <stream type>, "batch": [chunk…verbatim], "batch_v": 1 }`. The server treats it as ONE event: one stamp, one rate-limit unit, one history row.
 * Standard errors: `400` (validation), `401` (invalid token), `403` (missing scope or wrong partition), `404` (unknown group or socket).
 * Publishing to an unknown or empty group succeeds with `200 ok` and delivers to zero subscribers.
 
@@ -154,7 +153,7 @@ Rate limits use a fixed window per `client_id` (`RATE_WINDOW_SECONDS`, default 6
 
 When tripped:
 * Returns `429 { "error": "rate_limited", "detail": "…" }` with a `Retry-After` header indicating seconds until reset.
-* For streaming workloads (e.g. AI chain-of-thought deltas), batch updates by token group or buffer interval rather than issuing an HTTP call per token.
+* **For streaming workloads, use the publisher SDKs' coalesced send** rather than hand-rolled batching: `RealtimePublisher.coalesced_send_to_user(sub)` (`ar-realtime-client` — clients/python) and `RealtimePublisher.CoalescedSendToUser(sub)` (`Ar.Realtime.Client` — clients/dotnet). `offer()` / `Offer()` never blocks the hot path; batches self-tune to `generation_rate × RTT` (one in-flight publish per stream, strict ordering); on 429 the SDK honors `Retry-After` and re-sends the same batch once, then drops the batch and continues — see CONTRACT §3.1 for the wire shape.
 
 ### 4.5 · CORS & Origin Restrictions
 
@@ -164,14 +163,7 @@ Allowed browser origins must be configured in `ALLOWED_ORIGINS` (comma-separated
 
 Native clients (.NET, mobile) that can set HTTP headers can supply the connection JWT directly in the `Authorization: Bearer` header on the WebSocket upgrade, or use `?access_token=`. Re-negotiate on connection drops to obtain a fresh connection token.
 
-## 6 · Integration Best Practices
-
-1. **Never transmit IdP tokens via query parameters** or anywhere outside the negotiate `Authorization` header.
-2. **Do not bypass negotiate**: Direct WebSocket connection without a valid connection token returns `401`.
-3. **Do not disable automatic re-negotiation** or cache connection tokens across sessions.
-4. **All client-to-server interaction happens via HTTP API**: Clients have no callable hub methods on the WebSocket bus.
-
-## 7 · Key Environment Variables
+## 6 · Key Environment Variables
 
 | Variable | Description |
 |---|---|

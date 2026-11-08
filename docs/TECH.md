@@ -4,8 +4,6 @@
 > **Audience**: Core service maintainers, platform engineers, and DevOps/SREs.  
 > **Usage**: Consult for server internals, security fence mechanics, component maps, environment configurations, local test execution, and container deployment.
 
-Technical architecture and implementation guide for the Realtime Server.
-
 ---
 
 ## 1 · Architecture Overview
@@ -90,6 +88,19 @@ A single middleware placed after `UseAuthentication`:
 | `dev/e2e/e2e.mjs` | End-to-end integration and security test suite. |
 | `dev/run-spike.sh` | Orchestration script to run server and E2E tests against real or mock IdP. |
 | `Dockerfile` + `docker-compose.yml` | Multi-stage build and container deployment configuration. |
+
+### 4.1 · Client packages (`clients/`)
+
+| Package | Side | Notes |
+|---|---|---|
+| `@adolf94/realtime-client` (clients/ts) | consumer | hub subscription over negotiate-issued tokens; Cloudflare-safe UA. |
+| `ar-realtime-client` (clients/python, 0.1.1) | publisher | full server-API surface (uv/httpx); **coalesced send**: `coalesced_send_to_user(sub)` — single-flight publishing (one in-flight request per stream, batches self-tune to `generation_rate × RTT`), `offer()`/`drain()` semantics, 429 → `Retry-After` honored with one same-batch retry then drop+record. |
+| `Ar.Realtime.Client` (clients/dotnet, 0.1.0-local) | publisher | mirrors the python SDK, async-native: `CoalescedSendToUser(sub, CoalesceOptions?)` → `ICoalescedSendHandle` (`Offer` / `CompleteAsync` / `Snapshot`), identical semantics, `IRealtimePublisher` interface member. |
+
+Both publishers implement the CONTRACT §3.1 batch envelope: a flush is ONE
+`POST /api/users/{sub}/send` carrying `{type, batch, batch_v:1}` with the
+original chunks verbatim — one rate-limit unit per flush instead of one per
+chunk (the AI-reasoning token lane was the driving case; handover 2026-11-08).
 
 ## 5 · Configuration
 
@@ -176,6 +187,6 @@ Rotating `CONN_TOKEN_SECRET` invalidates active connection JWTs and prompts clie
 
 The central Caddy routes hang the whole service under one public prefix — the public URL is the prefix + the service's canonical paths, verbatim. `deploy/docker-compose.yml` (gh_webhooks target, `IMAGE=<sha>`, no host ports, homelab-wide `proxy` network) + `deploy/caddy-route.caddy` (paste into the `apis.adolfrey.com` server block): `/realtime-v2/*` → realtime:5000, while `/metrics`, `/openapi`, `/healthz` are denied at the edge (ops door stays on the internal docker network). Parallel-run first; the wall's `/websockets/*` handles stay until its consumers move.
 
-Before touching the central Caddy, the route shape is proven locally: `bash dev/edge-rehearsal.sh` boots a caddy:2 replica + the realtime container and the **full e2e drives only the edge** (`SRV=<edge>, EDGE=<prefix>, SRV_OPS=<internal ops door>`); the last run: 54/54, with metrics/openapi returning edge-404.
+Before touching the central Caddy, the route shape is proven locally: `bash dev/edge-rehearsal.sh` boots a caddy:2 replica + the realtime container and the **full e2e drives only the edge** (`SRV=<edge>, EDGE=<prefix>, SRV_OPS=<internal ops door>`); metrics/openapi return edge-404 when the rehearsal is correct.
 
 On the deploy host: put image + secret in `/srv/deploy/realtime/.env` (gh_webhooks sets `IMAGE`; `.env` holds `CONN_TOKEN_SECRET`, optional `ALLOWED_ORIGINS` overrides), run `docker compose up -d`, paste the Caddy route, reload, verify with `curl -si https://apis.adolfrey.com/realtime-v2/healthz | head` (expect 404-public, edge denies) and a live negotiate through the prefix. Decommission of the wall (stop `centrifugo`/`proxy`, archive `CENTRIFUGO.md`) is the final step after burn-in and requires the wall's consumers to have moved off `/websockets/*` first — the demo SPA still rides the wall, so its cutoff is an owner decision.

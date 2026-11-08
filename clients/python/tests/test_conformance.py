@@ -190,6 +190,34 @@ def test_options_accept_plain_callable_factory():
     assert RealtimePublisherOptions("http://x", StaticTokenProvider("s")).token_provider.get() == "s"
 
 
+def test_pc_live_coalescer_delivers_under_limiter():
+    """Live 600/60s lane (handover AC §6): a whole reasoning-ish stream rides the
+    coalescer to the real server — every chunk delivered, batches < chunks,
+    no 429 reaches the producer (LAN RTT+pacing keeps the window healthy)."""
+    if not SRV:
+        pytest.skip("no SRV — harness (dev/test-clients.sh python) provides the stack")
+    coalescer_publisher = RealtimePublisher(RealtimePublisherOptions(
+        base_url=SRV,
+        token_provider=StaticTokenProvider(mint("coalesce-python", PUBLISHER_SCOPE)),
+        user_agent_suffix="pytest-coalesce-live",
+    ))
+
+    handle = coalescer_publisher.coalesced_send_to_user("42")
+    events = [{"type": "ai_emission", "args": {"text": f"e{i:03d}"}} for i in range(500)]
+    started = time.perf_counter()
+    for event in events:
+        handle.offer(event)
+    stats = handle.drain()
+    elapsed = time.perf_counter() - started
+
+    assert stats.offered == 500 and stats.flushed == 500
+    assert stats.dropped == 0 and stats.last_error is None
+    # coalescing must actually engage — requests never equal chunks
+    assert stats.publishes < 500
+    # even if the window was brushed, an honored retry keeps total time sane
+    assert elapsed < 70
+
+
 def test_options_reject_garbage_providers():
     with pytest.raises(RealtimeValidationError):
         RealtimePublisherOptions(base_url="http://x", token_provider="raw-string")

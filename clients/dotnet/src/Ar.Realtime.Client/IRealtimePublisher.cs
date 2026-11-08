@@ -19,6 +19,13 @@ public interface IRealtimePublisher
     /// <summary>POST /api/users/{sub}/send — cross-service unicast over user_channel|{sub}; NOT partition-scoped by design.</summary>
     Task<SendResult> SendToUserAsync(string userSub, JsonObject data, CancellationToken ct = default);
 
+    /// <summary>
+    /// Coalesced single-flight handle over the same lane — opt-in (handover §3):
+    /// one in-flight publish per handle, batches self-tune to RTT, ordering
+    /// preserved. The handle owns exactly ONE user stream.
+    /// </summary>
+    ICoalescedSendHandle CoalescedSendToUser(string userSub, CoalesceOptions? options = null);
+
     /// <summary>POST /api/connections/{id}/send — partition-scoped (404 unknown / 403 foreign).</summary>
     Task<SendResult> SendToConnectionAsync(string connectionId, JsonObject data, CancellationToken ct = default);
 

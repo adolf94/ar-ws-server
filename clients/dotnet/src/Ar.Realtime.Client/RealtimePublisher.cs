@@ -70,6 +70,15 @@ public sealed class RealtimePublisher : IRealtimePublisher, IAsyncDisposable
         return new SendResult(body["ok"]!.GetValue<bool>(), body["user_id"]!.GetValue<string>(), null, null);
     }
 
+    /// <summary>
+    /// Single-flight coalesced stream to user_channel|{sub} — the reasoning token
+    /// lane. <see cref="ICoalescedSendHandle.Offer"/> is lock+append only; batches
+    /// self-tune to generation_rate × RTT; <see cref="ICoalescedSendHandle.CompleteAsync"/>
+    /// propagates the last error. Parity with python <c>coalesced_send_to_user</c>.
+    /// </summary>
+    public ICoalescedSendHandle CoalescedSendToUser(string userSub, CoalesceOptions? options = null)
+        => new CoalescedSendHandle(this, userSub, options);
+
     public async Task<SendResult> SendToConnectionAsync(string connectionId, JsonObject data, CancellationToken ct = default)
     {
         data = EnsureEnvelope(data);
@@ -163,11 +172,10 @@ public sealed class RealtimePublisher : IRealtimePublisher, IAsyncDisposable
     }
 
     // ── plumbing ─────────────────────────────────────────────────────────────
-    /// <summary>
     /// CONTRACT §3: the event's IDENTITY lives in data.type — from/sent_at
     /// are server-stamped, so the only client-side duty is the discriminator.
-    /// </summary>
-    private static JsonObject EnsureEnvelope(JsonObject data)
+    /// internal: the coalescer reuses the same eager validation on Offer()
+    internal static JsonObject EnsureEnvelope(JsonObject data)
     {
         if (data is null) throw new RealtimeValidationException("data carries the event (docs/CONTRACT.md §3)");
         if (data["type"]?.GetValueKind() is not JsonValueKind.String)

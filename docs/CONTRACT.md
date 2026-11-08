@@ -11,9 +11,7 @@ Client-side recipes/behaviors: `docs/INTEGRATION.md`. Server internals:
 `docs/TECH.md`.
 
 Freezing rule: additive changes extend this doc + the snapshot; breaking
-changes require **v2**.
-The bus side (SignalR hub) is governed by the SignalR protocol and server-side
-placement rules (§4); it has no client-invocable methods.
+changes require **v2**. Server-side placement rules are in §4–§5.
 
 ---
 
@@ -66,6 +64,26 @@ Fixed window per `client_id` partition (anonymous callers share the `anon` parti
 * Receivers ignore unknown `type` discriminators.
 * Delivery is once per connected receiver at send time (no store-and-forward unless history is enabled for the group).
 
+### 3.1 · Client-side coalescing batch (`batch_v`, optional, publisher SDKs only)
+
+The event envelope can carry several original events from one coalesced flush
+(ar-realtime-client `coalesced_send_to_user` / Ar.Realtime.Client
+`CoalescedSendToUser` — handover spec 2026-11-08: single-flight publishing so a
+reasoning stream batchifies instead of stalling the producer on RTT):
+
+```json
+{ "type": "<stream type>", "batch": [ <chunk1>, <chunk2>, … ], "batch_v": 1, "from": …, "sent_at": … }
+```
+
+* `batch` chunks ride VERBATIM (each keeps its own `type`/payload); the outer
+  `type` (the stream identity) is the first chunk's type in v1.1.
+* `batch_v: 1` keeps renderers forward compatible (new envelope additions
+  would bump it).
+* Server-side this is ONE event: one envelope, one `from`/`sent_at` stamp, one
+  rate-limit unit, and — when the group has history — one history row.
+* Consumers replaying coalesced deltas loop over `batch` items exactly like
+  individual "event" deliveries per item.
+
 ## 4 · Endpoints
 
 | Method & path | Auth | Request | 200/201 response | Errors |
@@ -101,6 +119,5 @@ Fixed window per `client_id` partition (anonymous callers share the `anon` parti
 
 ## 6 · Contract status
 
-* Machine-readable OpenAPI snapshot: `docs/openapi-v1.json`.
 * Publishing to an unknown group is accepted (delivers to zero subscribers).
-* Non-history groups do not record messages (history buffer is opt-in per group).
+* Non-history groups do not record messages (history is opt-in per group).

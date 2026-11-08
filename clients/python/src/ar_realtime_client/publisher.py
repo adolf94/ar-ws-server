@@ -13,6 +13,7 @@ from urllib.parse import quote
 
 import httpx
 
+from .coalescing import CoalescedSendHandle, DEFAULT_MAX_PENDING_CHARS
 from .errors import RealtimeApiError, RealtimeValidationError
 from .models import (
     BroadcastResult,
@@ -94,6 +95,18 @@ class RealtimePublisher:
         """cross-service unicast over user_channel|{sub}; NOT partition-scoped."""
         body = self._call("POST", f"/api/users/{quote(str(user_sub), safe='')}/send", {"data": self._envelope(data)})
         return SendResult(ok=body["ok"], user_id=body["user_id"])
+
+    def coalesced_send_to_user(
+        self,
+        user_sub: str,
+        *,
+        max_pending_chars: int = DEFAULT_MAX_PENDING_CHARS,
+    ) -> CoalescedSendHandle:
+        """Single-flight coalesced stream to user_channel|{sub} — the reasoning
+        token lane. offer() is lock+append only; batches self-tune to
+        generation_rate × RTT; drain() propagates the last error. See
+        coalescing.py (handover §3: one in-flight publish per handle, always)."""
+        return CoalescedSendHandle(self, user_sub, max_pending_chars=max_pending_chars)
 
     def send_to_connection(self, connection_id: str, data: dict[str, Any]) -> SendResult:
         body = self._call("POST", f"/api/connections/{quote(str(connection_id), safe='')}/send",

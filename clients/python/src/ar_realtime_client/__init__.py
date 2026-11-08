@@ -4,6 +4,7 @@ The hub (bus) side is read-only per contract — SPA/Node consumers belong to
 @adolf94/realtime-client (clients/ts).
 """
 
+from .coalescing import CoalesceStats, CoalescedSendHandle
 from .errors import RealtimeApiError, RealtimeClientError, RealtimeValidationError
 from .models import (
     BroadcastResult,
@@ -30,6 +31,8 @@ __all__ = [
     "RealtimePublisher",
     "RealtimePublisherOptions",
     "DEFAULT_USER_AGENT",
+    "CoalesceStats",
+    "CoalescedSendHandle",
     "RealtimeApiError",
     "RealtimeClientError",
     "RealtimeValidationError",
