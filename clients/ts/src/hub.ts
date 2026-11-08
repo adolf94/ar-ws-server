@@ -30,6 +30,14 @@ export interface RealtimeHubOptions {
    * withAutomaticReconnect; undefined = SignalR default (0s/3s/6s then stop).
    */
   reconnectIntervals?: number[] | false;
+  /**
+   * Fires after an auto-reconnect succeeds with the NEW server-assigned
+   * connection id (every reconnect re-negotiates, so the id changes —
+   * docs/CONTRACT.md). Roughly state `connecting` -> `connected`.
+   * The FIRST successful start() does not fire this (read
+   * `connectionId` after `await start()` instead).
+   */
+  onReconnected?: (connectionId: string | null) => void;
   logLevel?: LogLevel;
 }
 
@@ -69,6 +77,18 @@ export class RealtimeHubClient {
     return "stopped";
   }
 
+  /**
+   * Server-assigned connection id (docs/CONTRACT.md) — the same id other
+   * services address with POST /api/connections/{id}/send and
+   * disconnect-by-id. Set after negotiate succeeds; null until connected.
+   * Changes on EVERY reconnect (each reconnect re-negotiates), so re-read
+   * it — the `onReconnected` hook hands you the fresh one.
+   */
+  public get connectionId(): string | null {
+    // SignalR HubConnection exposes this after negotiate; null pre-connect
+    return this.connection?.connectionId ?? null;
+  }
+
   public async start(): Promise<void> {
     if (this.connection) throw new RealtimeHubError("already started (or starting)");
 
@@ -96,6 +116,8 @@ export class RealtimeHubClient {
     connection.on("event", (envelope: unknown) => this.dispatch(envelope));
     connection.onreconnecting((err) =>
       console.warn("realtime-client: reconnecting after", err?.message ?? String(err)));
+    connection.onreconnected((connectionId) =>
+      this.options.onReconnected?.(connectionId ?? null));
     this.connection = connection;
     await connection.start();
   }

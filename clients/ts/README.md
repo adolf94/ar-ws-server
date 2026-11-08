@@ -63,5 +63,6 @@ To avoid triggering bot mitigations against default SignalR user agent strings, 
 
 * **Token Negotiation**: `tokenFactory` runs on every initial connect and reconnection. Always return a fresh IdP token; connection JWTs expire within 5 minutes.
 * **Negotiation Gate**: Never set `skipNegotiation: true`, as negotiation performs required authentication.
+* **Connection id**: `hub.connectionId` returns the server-assigned connection id (`POST /api/connections/{id}/send` and disconnect-by-id target). It is `null` until connected and **changes on every reconnect** (each reconnect re-negotiates) — re-read it after reconnecting, or pass an `onReconnected(id)` option to receive the fresh id directly.
 * **Delivery**: Delivery is once per active connected receiver at send time. Backend-managed group memberships are automatically re-applied upon reconnect.
 * **Reconnect Backoff**: Default retry intervals are `[0, 3000, 6000, 12000, 24000]` ms.
