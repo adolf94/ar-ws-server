@@ -134,6 +134,7 @@ Entry points: python `coalesced_send_to_user(sub)` / `coalesced_send_to_connecti
 | `GET /api/groups` | Bearer | — | `{ok, partition, groups:[{group, members, online}]}` | — |
 | `GET /api/groups/{g}/presence` | Bearer | — | `{ok, group, group_partition, presence:[{user_id, client_id, online, connections}]}` | 404 group_not_found |
 | `GET /api/users/{sub}/connections` | Bearer+scope | — | `{ok, user_id, partition, connections:[{connection_id, instance_tag, persistent, sockets}]}` — the caller's partition's logical connections for one user (the inventory for the per-connection lanes); ordered oldest-first (uuidv7). Unknown/foreign users → empty list (no existence leak) | — |
+| `GET /api/my/connections` | Bearer | — | `{ok, user_id, partition, connections:[{connection_id, instance_tag, persistent, sockets}]}` — self-service variant: partition + sub derive from the verified bearer (caller = user); same envelope | — |
 | `GET /api/groups/{g}/history?limit=` | Bearer+scope | `?limit` (1..10 000, default 100) | `{ok, group, group_partition, history_enabled, total, history:[event…]}` — ascending tail over non-expired entries | 404 group_not_found |
 | `DELETE /api/groups/{g}/history` | Bearer+scope | — | `{ok, group, group_partition, cleared}` (disabled buffer → `cleared:0`) | 404 group_not_found |
 | `GET /healthz` / `GET /openapi/v1.json` | none | — | config probe / spec | — |

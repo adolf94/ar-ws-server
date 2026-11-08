@@ -164,6 +164,18 @@
         }
       }
     },
+    "/api/my/connections": {
+      "get": {
+        "tags": [
+          "Realtime"
+        ],
+        "responses": {
+          "200": {
+            "description": "OK"
+          }
+        }
+      }
+    },
     "/api/groups/{group}/history": {
       "get": {
         "tags": [

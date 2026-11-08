@@ -229,6 +229,42 @@ public static class RealtimeApiEndpoints
                 });
             });
 
+        // ── GET /api/my/connections — self-service inventory (2026-11-08):
+        // the users/{sub} read with the USER = THE CALLER: partition and sub
+        // derive from the VERIFIED bearer, so SPA/mobile clients can discover
+        // their own connection_id (e.g. to show it in a debug drawer) without
+        // knowing their raw sub string. Same-envelope response, same rate
+        // lane. Bearer only, NO publisher scope: the rows are the caller's
+        // own identity, and the connection JWT handshake of SPA users is the
+        // same scheme — matching the GET /api/groups* read-only posture.
+        endpoints.MapGet("/my/connections",
+            [Authorize(AuthenticationSchemes = AuthSchemes.Idp)]
+            (HttpContext http, IConnectionRegistry connections, IGroupPartitioner partitioner) =>
+            {
+                var sub = http.User.GetSubject();
+                // the IdP scheme refuses identityless tokens (no anonymous
+                // connections), so an empty sub cannot happen for a valid
+                // bearer — kept as a defensive hinge, 401 not 4xx-validation
+                if (string.IsNullOrEmpty(sub))
+                    return Results.Unauthorized();
+
+                var partition = partitioner.PartitionOf(http.User);
+                var snapshot = connections.SnapshotsFor(partitioner.Physical(partition, sub));
+                return Results.Ok(new
+                {
+                    ok = true,
+                    user_id = sub,
+                    partition,
+                    connections = snapshot.Select(c => new
+                    {
+                        connection_id = c.ConnectionId,
+                        instance_tag = c.InstanceTag,   // null = untagged per-socket id (legacy semantics)
+                        persistent = c.Persistent,      // tagged: the id survives reconnect (boundless still)
+                        sockets = c.Sockets,            // 0 = known but currently boundless
+                    }),
+                });
+            });
+
         // ── POST /api/connections/{id}/disconnect — force-close a logical
         // connection (plan §5.3, v1.1: the id is the server-minted,
         // reconnect-stable UUIDv7; every socket currently bound to it is
