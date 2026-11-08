@@ -442,3 +442,39 @@ round-trip), confirm green, then `git add -A && git commit -m "phase-0 spike: ne
   WIP; actual central-Caddy paste + wall decommission happen on the deploy
   host (apis host). Demo SPA still rides `/websockets/*` → wall cutoff is an
   owner decision after burn-in.
+
+**Follow-up 16 — 2026-11-08 (CI pipeline convergence + python client 0.1.1):**
+- **python client fix**, `6542156`: `RealtimePublisherOptions` NameErrored on
+  plain-callable token providers in the 0.1.0 wheel (`CallableTokenProvider`
+  referenced but not imported in publisher.py — owner hit this and worked
+  around it with a `.get()`-style object). Fix + hardening: garbage raw
+  dict/str providers now raise `RealtimeValidationError` up front (bare
+  `hasattr(x,'get')` passes dicts → garbage bearer). Version 0.1.0 → **0.1.1**
+  (wheel rebuilds clean; conformance 10/10 — 8 prior + 2 regression tests).
+- **CI lane is owner-authoritative, now converged**:
+  `.github/workflows/deploy-gh-webhooks.yml` (owner, committed `9e895a9`,
+  reworked since): two jobs — build (stage vendored feed **from GitHub
+  Packages**: `Ar.Auth.OpenId` fetch of the exact pin → buildx → GHCR
+  `sha-<short7>`) + deploy (signed gh_webhooks POST, wire protocol per skill:
+  `{repo, tag}`, `X-Timestamp`+`X-Signature` HMAC over `<ts>.<body>`, CF
+  Access headers, hardcoded `https://apis.adolfrey.com/gh_webhooks/d`).
+- csproj pins moved to **Ar.Auth.OpenId 1.2.1** (server + dotnet client;
+  owner edit). Server `dotnet build` green — `local-nuget` carries
+  `Ar.Auth.OpenId.1.2.1.nupkg`; upstream `ar-oauth2` has the
+  `publish-dotnet-client.yml` pipeline that publishes it.
+- **GHCR naming convergence** (owner compose edit defaults manual boot to
+  `ghcr.io/adolf94/realtime:latest`, but CI pushed only the repo-named name):
+  CI now ALSO aliases the manifest onto `ghcr.io/adolf94/realtime:{sha-,
+  latest}` via `docker buildx imagetools create` (server-side retag, no
+  rebuild; main-only). Both GHCR names resolve; repo stays `ar-ws-server`.
+- **Owner-side prerequisites for the first green run** (NOT mine):
+  1. GitHub Packages: grant `adolf94/ar-ws-server` read access on the
+     `Ar.Auth.OpenId` package (GITHUB_TOKEN of another repo cannot read it by
+     default — the stage step's fail message says exactly this).
+  2. Repo secrets: `CF_ACCESS_CLIENT_ID`, `CF_ACCESS_CLIENT_SECRET`,
+     `HOMELAB_WEBHOOK_SECRET` (values match the wall's gh_webhooks setup).
+  3. gh_webhooks `deploy_config.json`: whitelist
+     `"adolf94/ar-ws-server": {"dir": "/srv/deploy/realtime",
+     "image": "ghcr.io/adolf94/realtime"}`.
+  4. Deploy host: `/srv/deploy/realtime/` = deploy/docker-compose.yml +
+     `.env` (`CONN_TOKEN_SECRET`; optional `ALLOWED_ORIGINS`).

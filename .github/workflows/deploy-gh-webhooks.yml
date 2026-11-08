@@ -81,6 +81,22 @@ jobs:
           cache-to: type=gha,mode=max
           platforms: linux/amd64
 
+      # deploy/ rides the shorter image name ghcr.io/adolf94/realtime (compose
+      # default + the gh_webhooks deploy_config.json image field). Alias the
+      # repo-named manifest onto it — server-side retag, no rebuild.
+      - name: Alias realtime naming (sha tag + latest)
+        if: github.ref_name == 'main'
+        env:
+          TAG: ${{ steps.meta.outputs.tag }}
+        run: |
+          src="${{ env.REGISTRY }}/${{ env.IMAGE_NAME }}:${TAG}"
+          for target in \
+            "${{ env.REGISTRY }}/adolf94/realtime:${TAG}" \
+            "${{ env.REGISTRY }}/adolf94/realtime:latest"; do
+            docker buildx imagetools create -t "$target" "$src"
+          done
+          echo "aliased: $src"
+
   deploy:
     # Separate stage: only POSTs the webhook, never rebuilds the image.
     # Needs the exact tag build pushed (see build.outputs.tag).
