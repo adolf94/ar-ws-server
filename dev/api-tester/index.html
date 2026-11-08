@@ -129,6 +129,12 @@
         <button id="btn-probe-disconnect" class="small" disabled>Disconnect</button>
         <span id="probe-status" class="warn">offline</span>
       </div>
+      <label>bearer JWT override (optional — e.g. from your SPA session; connects AS this token's sub)</label>
+      <input id="f-probe-jwt" type="password" placeholder="empty = use the minted/pasted token from the Auth section" autocomplete="off">
+      <div class="row" style="margin-top:6px">
+        <button id="btn-probe-scan" class="small">Scan SPA session storage</button>
+        <span id="probe-jwt-status" class="warn">override: none → minted token</span>
+      </div>
       <label>instance tag (?instance= — stable self-label; reconnect rebinds the same connection_id)</label>
       <input id="probe-instance" placeholder="e.g. ui-probe-1 (empty = per-socket id, fresh every reconnect)">
       <div class="check">
@@ -426,6 +432,64 @@ function watchEnvelope(data) {
 // accessTokenFactory's JWT in the negotiate's Authorization header, and the
 // server then swaps in the ≤5-min connection JWT for the WS handshake
 // (SecurityFenceMiddleware: { url, accessToken } negotiate extension).
+// OPTIONAL OVERRIDE: a bearer JWT pasted in probe-jwt (e.g. the access token
+// from the user's SPA session) connects the probe AS that token's sub; when
+// empty the Auth section's minted/pasted token is used.
+
+function probeBearer() {
+  const override = $('f-probe-jwt').value.trim();
+  if (override) {
+    let claims = null;
+    try { claims = decodeJwt(override); } catch {}
+    return { raw: override, claims, source: 'override (SPA session token)' };
+  }
+  return token
+    ? { raw: token.access_token, claims: token.claims, source: 'Auth section token' }
+    : null;
+}
+
+function updateProbeJwtStatus() {
+  const el = $('probe-jwt-status');
+  const override = $('f-probe-jwt').value.trim();
+  if (!override) { el.className = 'warn'; el.textContent = 'override: none → minted token'; return; }
+  const b = probeBearer();
+  if (!b.claims) { el.className = 'err'; el.textContent = 'override: invalid JWT'; return; }
+  const expired = (b.claims.exp ?? 0) * 1000 <= Date.now();
+  el.className = expired ? 'err' : 'ok';
+  el.textContent = expired
+    ? `override EXPIRED (sub=${b.claims.sub ?? '—'})`
+    : `override: sub=${b.claims.sub ?? '—'} — exp ${new Date(b.claims.exp * 1000).toLocaleTimeString()}`;
+}
+
+// find JWT-like access tokens dumped into this page's session storage —
+// works when the tester is served from the SAME ORIGIN as the SPA
+function scanSessionForJwt() {
+  const hits = [];
+  for (const [label, store] of [['localStorage', localStorage], ['sessionStorage', sessionStorage]]) {
+    for (let i = 0; i < store.length; i++) {
+      const key = store.key(i);
+      let rawString;
+      try { rawString = String(store.getItem(key)); } catch { continue; }
+      const candidates = [rawString];
+      try {   // SPA caches often JSON-wrap the token
+        const parsed = JSON.parse(rawString);
+        for (const k of ['access_token', 'accessToken', 'token', 'jwt'])
+          if (typeof parsed?.[k] === 'string') candidates.push(parsed[k]);
+      } catch {}
+      for (const candidate of candidates) {
+        let claims = null;
+        try { claims = decodeJwt(candidate); } catch { continue; }
+        if (claims.exp && claims.exp * 1000 <= Date.now()) {
+          hits.push({ label: `${label}.${key}`, claims, expired: true, raw: candidate });
+          continue;
+        }
+        hits.push({ label: `${label}.${key}`, claims, expired: false, raw: candidate });
+      }
+    }
+  }
+  return hits;
+}
+
 async function probeConnect() {
   if (typeof signalR === 'undefined') {
     pLog('lg-err', 'SignalR client not loaded (CDN script blocked?) — check network/devtools and reload');
@@ -434,34 +498,41 @@ async function probeConnect() {
   if (!base()) { pLog('lg-err', 'set base_url first'); return; }
 
   // required: a valid bearer JWT before /negotiate is attempted
-  if (!tokenValid()) {
+  let bearer = probeBearer();
+  if (!bearer || (!($('f-probe-jwt').value.trim()) && !tokenValid())) {
     if ($('f-client').value.trim() && $('f-secret').value) {
       pLog('lg', '/negotiate needs a JWT — minting…');
       await mint();
+      bearer = probeBearer();
     }
-    if (!tokenValid()) {
+    if (!bearer || (!($('f-probe-jwt').value.trim()) && !tokenValid())) {
       pState('no token', 'err');
-      pLog('lg-err', '/negotiate REFUSED: a bearer JWT is required (mint one in the Auth section, or paste it there manually)');
+      pLog('lg-err', '/negotiate REFUSED: a bearer JWT is required (mint one in the Auth section, paste it there manually, or set the probe overrides)');
       return;
     }
   }
-  const claims = token.claims;
-  if (!claims.sub) {
+  const { raw, claims, source } = bearer;
+  if (!claims || !claims.sub) {
     pState('token has no sub', 'err');
-    pLog('lg-err', 'probe refused: the fence rejects identityless tokens (no anonymous connections)');
+    pLog('lg-err', `probe refused (${source}): the fence rejects invalid or identityless tokens (no anonymous connections)`);
+    return;
+  }
+  if ((claims.exp ?? 0) * 1000 <= Date.now()) {
+    pState('token expired', 'err');
+    pLog('lg-err', `${source} is EXPIRED — sub=${claims.sub ?? '—'} (exp was ${new Date(claims.exp * 1000).toLocaleTimeString()})`);
     return;
   }
 
   const instance = $('probe-instance').value.trim();
   const hubUrl = base() + '/realtime/hub' + (instance ? `?instance=${encodeURIComponent(instance)}` : '');
-  const fp = token.access_token.slice(0, 8) + '…' + token.access_token.slice(-6);   // never log the full JWT
+  const fp = raw.slice(0, 8) + '…' + raw.slice(-6);   // never log the full JWT
   pLog('lg', `negotiate → ${hubUrl}`);
-  pLog('lg', `Authorization: Bearer ${fp} (sub=${claims.sub}, client_id=${claims.client_id ?? '—'})`);
+  pLog('lg', `Authorization: Bearer ${fp}  [${source}] (sub=${claims.sub}, client_id=${claims.client_id ?? '—'})`);
 
   const conn = new signalR.HubConnectionBuilder()
     .withUrl(hubUrl, {
       transport: signalR.HttpTransportType.WebSockets,   // server is websockets-only
-      accessTokenFactory: () => token.access_token,      // → negotiate carries Bearer; server mints the connection JWT
+      accessTokenFactory: () => raw,                     // → negotiate carries Bearer; server mints the connection JWT
     })
     .configureLogging({
       log: (level, message) => {
@@ -520,6 +591,19 @@ renderFields();
 showToken();
 preview();
 
+$('f-probe-jwt').addEventListener('input', () => { updateProbeJwtStatus(); save(); });
+$('btn-probe-scan').addEventListener('click', () => {
+  const hits = scanSessionForJwt();
+  if (hits.length === 0) {
+    pLog('lg-err', 'no JWT-like values found in localStorage/sessionStorage — the tester may be on a different origin than the SPA, or the session is expired/empty');
+    return;
+  }
+  const active = hits.find(h => !h.expired) ?? hits[0];
+  $('f-probe-jwt').value = active.raw;
+  updateProbeJwtStatus();
+  pLog('lg', `override set from ${active.label} — sub=${active.claims.sub ?? '—'}${active.expired ? ' (EXPIRED token — first hit)' : ''}`);
+  hits.forEach(h => pLog('lg', `found ${h.expired ? '(expired) ' : ''}JWT at ${h.label}: sub=${h.claims.sub ?? '—'}, client_id=${h.claims.client_id ?? '—'}${h.label === active.label ? ' ← used' : ''}`));
+});
 // bus probe wiring
 $('btn-probe-connect').addEventListener('click', probeConnect);
 $('btn-probe-disconnect').addEventListener('click', probeDisconnect);
