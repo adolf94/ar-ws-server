@@ -1,6 +1,6 @@
 {
   "name": "@adolf94/realtime-client",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Consumer client for the realtime microservice (realtime.adolfrey.com): SignalR hub subscription with envelope routing, reconnect handling, and a Cloudflare-safe User-Agent on non-browser lanes. See the realtime repo's docs/CONTRACT.md — the hub is read-only; publishing lives in the server API (publisher libraries).",
   "type": "module",
   "main": "./dist/index.js",

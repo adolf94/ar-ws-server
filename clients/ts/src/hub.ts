@@ -51,7 +51,7 @@ export interface RealtimeHubOptions {
    * Semantics: same tag → the server re-binds the SAME logical
    * connection_id across reconnects (stale sockets superseded); no tag →
    * fresh per-socket id on every reconnect.
-   * DEFAULT `true` (v0.2.0): the SDK generates a UUID and persists it in
+   * DEFAULT `true` (v0.3.0): the SDK generates a UUID and persists it in
    * sessionStorage (`realtime-instance-tag`) in the browser — PER-TAB, so
    * every tab is its own logical instance (a localStorage-shared tag would
    * make two tabs supersede-abort each other's sockets on connect); Node
@@ -62,17 +62,21 @@ export interface RealtimeHubOptions {
    */
   instanceTag?: string | boolean;
   /**
-   * Connect-time partition alias (CONTRACT §1, additive 2026-11-08) —
+   * Connect-time partition rider (CONTRACT §1, additive 2026-11-08) —
    * appended to the hub URL as `?partition=` for EVERY negotiate (merged
    * into the query alongside `?instance=`, preserved across
-   * re-negotiates). Granted by the server only when the verified token's
-   * `aud` contains the requested partition: aud issuance at the IdP is the
-   * control surface — point this at the RESOURCE audience your token
-   * already carries (e.g. the backend's client, `finance-app-api`) to land
-   * the connection in that partition so its group memberships apply to
-   * this socket. The bus plane (hub identity/memberships) uses the alias;
-   * the REST plane keeps the real token's client_id. Rejection surfaces as
-   * a failed start(): 403 `partition_not_in_token` (aud miss) or
+   * re-negotiates).
+   * DEFAULT: the token's own `client_id`. Appended explicitly ONLY when
+   * the resolved token's aud contains it (mirroring the server's alias
+   * gate — a rider the fence would reject must never go on the wire);
+   * otherwise no rider is sent and the fence assigns the same partition
+   * implicitly, so the connection lands identically either way.
+   * Point the option at the RESOURCE audience your token already carries
+   * (e.g. the backend's client, `finance-app-api`) to land the connection
+   * in that partition so its group memberships apply to this socket. The
+   * bus plane (hub identity/memberships) uses the partition; the REST
+   * plane keeps the real token's client_id. Rejection surfaces as a
+   * failed start(): 403 `partition_not_in_token` (aud miss) or
    * `partition_not_allowed` (reserved pseudo-partition, e.g. user_channel).
    */
   partition?: string;
@@ -135,9 +139,34 @@ export class RealtimeHubClient {
   public async start(): Promise<void> {
     if (this.connection) throw new RealtimeHubError("already started (or starting)");
 
+    // partition DEFAULT (CONTRACT §1): the token's own client_id. It is
+    // appended EXPLICITLY only when the resolved token's aud contains it —
+    // mirroring the server's alias gate — because a rider the fence would
+    // reject must never go on the wire. When omitted here, the fence
+    // assigns the same partition implicitly, so the connection lands in
+    // the same place either way; the rider just makes the identity
+    // deterministic and visible in negotiate logs. The resolution turns
+    // the tokenFactory once per start(); a reconnect keeps this rider
+    // (fresh tokens ride the same URL — supply partition explicitly if
+    // your tokens can rotate clients mid-session).
+    let partition = this.options.partition;
+    if (!partition) {
+      try {
+        const claims = decodeToken(await this.options.tokenFactory());
+        const clientId = claims?.client_id, aud = claims?.aud;
+        const audiences = (Array.isArray(aud) ? aud : [aud])
+          .filter((a): a is string => typeof a === "string");
+        if (typeof clientId === "string" && clientId.length > 0
+            && audiences.includes(clientId)) partition = clientId;
+      } catch {
+        // tokenFactory failure here would double-signal at negotiate —
+        // degrade to the implicit partition (no rider) instead.
+      }
+    }
+
     // negotiate IS the auth entry point (docs/INTEGRATION.md §2) — never skip.
     const builder = new HubConnectionBuilder()
-      .withUrl(this.hubUrl(), {
+      .withUrl(this.hubUrl(partition), {
         accessTokenFactory: this.options.tokenFactory,
         transport: HttpTransportType.WebSockets, // WS-only upstream (docs/TECH.md)
         // both names: Node lane merges options.headers over the stock UA on
@@ -178,14 +207,14 @@ export class RealtimeHubClient {
     return this.options.userAgent ?? `Microsoft SignalR/10 (via ${USER_AGENT})`;
   }
 
-  /** hub URL with SDK-managed riders merged into the query (CONTRACT §1/§2.2):
-   *  `partition` (aud-gated alias) and `instance` (client-set self-label) —
-   *  set via searchParams so caller-supplied params (incl. pre-existing
+  /** hub URL with the riders merged into the query (CONTRACT §1/§2.2):
+   *  `partition` (explicit option, or the token's own client_id default —
+   *  aud-gated) and `instance` (SDK-managed self-label) — set via
+   *  searchParams so caller-supplied params (incl. pre-existing
    *  `?instance=`) survive instead of being clobbered. */
-  private hubUrl(): string {
+  private hubUrl(partition?: string): string {
     const url = new URL(this.options.url); // absolute hub URL is the documented shape
-    const alias = this.options.partition;
-    if (alias && alias.length > 0) url.searchParams.set("partition", alias);
+    if (partition && partition.length > 0) url.searchParams.set("partition", partition);
     const tag = resolveInstanceTag(this.options.instanceTag ?? true);
     if (tag) url.searchParams.set("instance", tag);
     return url.toString();
@@ -230,6 +259,22 @@ export function createRealtimeHub(options: RealtimeHubOptions): RealtimeHubClien
 }
 
 /* ── instance tag resolution (CONTRACT §2.2, client-set self-label) ─────── */
+
+/** claims of a bearer token — no library: base64url decode of the payload */
+function decodeToken(token: string): Record<string, unknown> | null {
+  const parts = token.split(".");
+  if (parts.length !== 3) return null;
+  try {
+    const json = new TextDecoder().decode(Uint8Array.from(
+      atob(parts[1]!.replaceAll("-", "+").replaceAll("_", "/")),
+      (c) => c.charCodeAt(0),
+    ));
+    return JSON.parse(json);
+  } catch {
+    return null;
+  }
+}
+
 // sessionStorage (NOT localStorage): the tag must be PER-TAB — every tab is
 // its own logical client instance. A localStorage-shared tag would make two
 // tabs supersede-abort each other's sockets on every connect.

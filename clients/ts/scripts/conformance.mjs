@@ -13,6 +13,9 @@
 //   UA-1    negotiate/WS lanes carry OUR User-Agent (local echo capture)
 //   PART-1  hubUrl merge: SDK riders (partition + instance options)
 //           co-exist with caller params (local echo capture — CONTRACT §1/§2.2)
+//   PART-1b instanceTag defaults ON — ?instance= present with no options
+//   PART-1c partition defaults to the token's client_id (aud contains it)
+//   PART-1d no partition rider when the aud misses client_id (fence-safe)
 //   PART-2  live alias: token aud contains the partition → connection lands in
 //           the partition; backend membership applies; publish delivers
 //   PART-3  live negative: partition missing from the token's aud → negotiate
@@ -208,6 +211,27 @@ await hub.stop();
   await plainEchoHub.stop();
   check('PART-1b. instanceTag defaults ON — ?instance= present with no options',
     (negotiatePaths[1] ?? '').includes('instance='), `negotiate URL=${JSON.stringify(negotiatePaths[1])}`);
+
+  // default partition: the token's own client_id, appended ONLY when the
+  // aud contains it (PART-1c); omitted otherwise (PART-1d) — both fence-safe
+  const jointToken = await mintMock({
+    sub: '44', scope: 'realtime:connect', client_id: 'spa-demo-client',
+    aud: ['centrifugo', 'spa-demo-client'],   // aud CONTAINS own client → rider expected
+  });
+  const jointEchoHub = createRealtimeHub({ url: `${echoUrl}/realtime/hub`, tokenFactory: async () => jointToken });
+  await jointEchoHub.start().catch(() => {});
+  await jointEchoHub.stop();
+  check('PART-1c. partition defaults to the token client_id when aud contains it',
+    (negotiatePaths[2] ?? '').includes('partition=spa-demo-client'),
+    `negotiate URL=${JSON.stringify(negotiatePaths[2])}`);
+
+  const riderlessToken = await mintMock({ sub: '45', scope: 'realtime:connect', client_id: 'spa-demo-client' });
+  const riderlessEchoHub = createRealtimeHub({ url: `${echoUrl}/realtime/hub`, tokenFactory: async () => riderlessToken });
+  await riderlessEchoHub.start().catch(() => {});
+  await riderlessEchoHub.stop();
+  check('PART-1d. no partition rider when the aud misses client_id (fence-safe lapse)',
+    (negotiatePaths[3] ?? '').includes('negotiate') && !(negotiatePaths[3] ?? '').includes('partition='),
+    `negotiate URL=${JSON.stringify(negotiatePaths[3])}`);
   echo.close();
 }
 

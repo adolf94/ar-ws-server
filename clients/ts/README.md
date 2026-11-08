@@ -64,8 +64,9 @@ const hub = createRealtimeHub({
 });
 ```
 
-* The alias rides as `?partition=finance-app-api` on every negotiate (co-exists with `?instance=`), and survives re-negotiates.
-* The **bus plane** (hub identity, group memberships, socket ops) uses the aliased partition; the **REST plane** keeps the token's real `client_id`.
+* **Default**: when `partition` is not provided, it resolves to **the token's own `client_id`** and is appended explicitly, but ONLY when the token's `aud` contains it (mirroring the server's gate). A missing aud entry means no rider — and the fence assigns that same partition implicitly, so the effective landing partition is identical: always the token's `client_id`. The resolution probes `tokenFactory` once per `start()`.
+* The riders (`?partition=`, `?instance=`) merge into the query, co-exist with caller params, and survive re-negotiates.
+* The **bus plane** (hub identity, group memberships, socket ops, `/api/connections` rows) uses the aliased partition; the **REST plane** keeps the token's real `client_id`.
 * Rejection: `start()` fails with 403 — `partition_not_in_token` (aud miss) or `partition_not_allowed` (reserved pseudo-partition).
 * The control surface is IdP audience issuance: remove the audience grant, close the door — no server changes.
 

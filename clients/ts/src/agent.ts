@@ -22,5 +22,5 @@
  * HTTP lanes of this package (tooling) simply set `User-Agent` directly.
  */
 export const LIB_NAME = "realtime-client-ts";
-export const LIB_VERSION = "0.2.0";
+export const LIB_VERSION = "0.3.0";
 export const USER_AGENT = `${LIB_NAME}/${LIB_VERSION}`;
