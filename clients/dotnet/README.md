@@ -64,13 +64,11 @@ foreach (var chunk in EnumerateModelStream())      // NEVER awaits HTTP
 Per-TAB CoT streams ride the **connection lane** the same way —
 `CoalescedSendToConnection(connectionId)` (identical semantics; independent
 single-flight windows per tab). `connectionId` is the server-minted LOGICAL
-id — the `connection_id` from the `connection_registered` envelope the server
-publishes on the user's socket — NOT SignalR's transport socket id. A 404
-(`connection_not_connected` = id known but zero live sockets;
-`connection_not_found` = unknown) or 403 (`connection_not_in_partition`)
-surfaces as the non-429 drop path — treat connection 404 as the cue to fall
-back to `SendToUserAsync`; the server response also carries `delivered`
-(socket fan-out count; CONTRACT §4).
+id — the SPA captures it from the `connection_registered` envelope
+(CONTRACT §2.2/§5), not SignalR's transport socket id. A connection 404
+(`connection_not_found` / `connection_not_connected`) or 403 surfaces as the
+non-429 drop path — a 404 is the cue to fall back to `SendToUserAsync`; the
+server response carries `delivered` (socket fan-out count, CONTRACT §4).
 
 Explicit form when you want the stats: `await chunks.CompleteAsync()` → throws
 the last batch failure once (typically `RealtimeApiException`; then re-serves

@@ -52,13 +52,13 @@ Two authentication schemes by endpoint:
 * **Partition scoping**: The caller's `client_id` partitions groups and user identities via `GroupPartitioner`. A service manages only its own users and groups.
 * **Global unicast**: Cross-service user messaging (`POST /api/users/{sub}/send`) addresses `user_channel|{sub}`, delivering to all active connections for that `sub` across all services.
 
-### Connection Lifecycle (v1.1 addressing model, CONTRACT §2.2/§5)
+### Connection Lifecycle (v1.1 — addressing model spec: CONTRACT §2.2; connect flow: §5)
 
-* Three addresses: `socket_id` (SignalR transport id, churns every reconnect, never addressable), logical **`connection_id`** (server-minted UUIDv7 via `Guid.CreateVersion7()`, stable per `client_id, sub, instance tag`), and `sub` via `user_channel|{sub}`.
-* `OnConnectedAsync` (`src/Realtime/Hubs/RealtimeHub.cs`) reads the `instance` tag off the WS upgrade request and binds via `IConnectionRegistry.Bind`: first sight mints the UUIDv7; the same tag on a reconnect re-binds to the SAME id and **supersedes** stale sockets still bound to it (aborted through `IConnectionAborts`), the count of successfully aborted stale sockets landing in the envelope's `superseded`. Untagged sockets get fresh per-socket ids (legacy one-socket semantics).
-* The id is delivered as a server-published envelope on the just-connected socket (the hub has ZERO invocable methods): `{type:"connection_registered", connection_id, socket_id, instance_tagged, superseded, from:"server", sent_at}`.
-* `InMemoryConnectionRegistry` (`src/Realtime/Connections/ConnectionRegistry.cs`) keeps two layers: per-socket presence (`_byUser`/`_bySocket` — membership, presence counts) and logical bindings (`_idByInstance`, `_byLogical`, `_logicalBySocket`). Tagged ids stay bound (boundless) after disconnect so reconnects re-bind; untagged ids die with their last socket. Persistence is deliberately absent: ids survive **client** reconnects, not server restarts.
-* The connection endpoints fan out over the logical id — send delivers to every bound socket (`delivered` = socket count; `404 connection_not_connected` when the id is known but boundless, `connection_not_found` when unknown), disconnect aborts ALL bound sockets (`aborted` = count). Partition scoping goes through `IConnectionRegistry.TryGetOwner` (403 foreign). Senders treat 404 as the cue to fall back to the user-channel lane.
+* Addresses & lifetimes are CONTRACT §2.2's table: `socket_id` (transport id, churns every reconnect, never addressable), logical `connection_id` (server-minted UUIDv7 via `Guid.CreateVersion7()`), `sub` via `user_channel|{sub}`.
+* `OnConnectedAsync` (`src/Realtime/Hubs/RealtimeHub.cs`) reads the `instance` tag off the WS upgrade request and binds via `IConnectionRegistry.Bind` — the §2.2 mint/rebind/supersede mechanics run here; superseded sockets are aborted through `IConnectionAborts` and the successful-abort count lands in the envelope's `superseded`. Untagged sockets keep legacy per-socket ids.
+* The id is delivered as a server-published `connection_registered` envelope on the just-connected socket (exact fields: CONTRACT §5) — the hub has ZERO invocable methods.
+* `InMemoryConnectionRegistry` (`src/Realtime/Connections/ConnectionRegistry.cs`) keeps two layers: per-socket presence (`_byUser`/`_bySocket` — membership, presence counts) and logical bindings (`_idByInstance`, `_byLogical`, `_logicalBySocket`). Tagged ids stay bound (boundless) across disconnects so reconnects re-bind; untagged ids die with their last socket. Client-reconnect vs. server-restart lifetime: §2.2.
+* The connection endpoints fan out over the logical id — `delivered`/`aborted` counts and the `connection_not_found`/`connection_not_connected` 404 split: CONTRACT §4. Partition checks go through `IConnectionRegistry.TryGetOwner` (403 foreign); the 404 → user-channel fallback rule lives in §2.2.
 
 ## 3 · Security Fence (`Negotiate/SecurityFenceMiddleware.cs`)
 
@@ -86,7 +86,7 @@ A single middleware placed after `UseAuthentication`:
 | `src/Realtime/Auth/PrincipalExtensions.cs` | Helper extensions to extract `sub` and `client_id` claims. |
 | `src/Realtime/Auth/SubUserIdProvider.cs` | Maps connection principal to partitioned `Context.UserIdentifier`. |
 | `src/Realtime/Groups/GroupPartitions.cs` | Encodes and decodes physical `client_id|logical` keys for groups and users. |
-| `src/Realtime/Connections/ConnectionRegistry.cs` | Two-layer in-memory registry (v1.1): per-socket presence (`_byUser`/`_bySocket`) plus logical connections (`_idByInstance`/`_byLogical`) — `Bind` mints UUIDv7 ids per `(client_id, sub, instance tag)`, tagged ids re-bind across reconnects, `TryGetOwner` gives the partition check. Deliberately not persisted across restarts. |
+| `src/Realtime/Connections/ConnectionRegistry.cs` | Two-layer in-memory registry (v1.1): per-socket presence (`_byUser`/`_bySocket`) plus logical connections (`_idByInstance`/`_byLogical`) — `Bind` mints UUIDv7 ids per `(client_id, sub, instance tag)`, tagged ids re-bind across reconnects, `TryGetOwner` gives the partition check (lifetime rules: CONTRACT §2.2). |
 | `src/Realtime/Connections/GroupRegistry.cs` | In-memory registry tracking group metadata, history buffers, and memberships. |
 | `src/Realtime/Connections/ConnectionAborts.cs` | Tracks live `HubCallerContext` instances to support server-initiated disconnects. |
 | `src/Realtime/Hubs/RealtimeHub.cs` | SignalR hub: binds the logical `connection_id` on connect and supersedes stale sockets (v1.1), publishes the `connection_registered` envelope, re-applies group memberships + `user_channel`; zero invocable methods. |
@@ -177,7 +177,7 @@ The test suite validates negotiate token injection, WebSocket handshake authenti
 
 ## 8 · Operational Characteristics & Constraints
 
-* **In-memory state**: Group registry, active connection mappings, and history buffers are held in memory. State is reset on process restart; logical `connection_id`s minted per instance tag do not survive it (v1.1 — clients re-mint on their next connect and senders fall back to the user lane).
+* **In-memory state**: Group registry, active connection mappings, and history buffers are held in memory. State is reset on process restart; logical `connection_id`s do not survive it (lifetime rules: CONTRACT §2.2).
 * **Single-process scope**: Group and connection tracking operates within the local process instance.
 * **Rate limiting**: Fixed-window counters are maintained in memory per `client_id` partition.
 * **Metrics isolation**: `/metrics` is unauthenticated and unrate-limited to facilitate automated scraping; bind this endpoint to an internal network interface.

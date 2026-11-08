@@ -67,8 +67,8 @@ Three addresses with three lifetimes:
   `(client_id, sub, instance tag)` — clients never choose their own id, which
   keeps the address authoritative and uniformly sortable.
 * The instance tag is the client's stable self-label (a UUID in localStorage /
-  process env), carried as the `instance` query parameter on the hub URL
-  (present on the WS upgrade request; the SignalR negotiate also forwards it).
+  process env), carried as the `instance` query parameter on the hub URL —
+  the hub reads it off the client's WS upgrade request.
   It is NOT security-relevant: identity and partitioning are fenced by the
   connection JWT; a forged tag only addresses a sibling socket of the same `sub`.
 * Sockets NOT sending a tag get per-socket logical ids (fresh each reconnect —
@@ -148,7 +148,7 @@ Entry points: python `coalesced_send_to_user(sub)` / `coalesced_send_to_connecti
 
 ## 5 · Connect-time placement (hub side, automatic)
 
-* **Mint & bind (v1.1, §2.2)**: at connect the server binds the socket to the logical `connection_id` for `(client_id, sub, instance tag)` — the tag arrives as the `instance` query parameter on the hub URL; first sight mints a UUIDv7; a reconnect with the same tag re-binds to the SAME id and **supersedes** any stale socket still bound to it (server force-aborts it).
+* **Mint & bind (v1.1)**: on connect the hub performs the §2.2 mint/bind/rebind mechanics for this socket's logical `connection_id` (first-connect mint, same-tag reconnect re-bind, stale-socket supersede-abort), then hands the id over:
 * **Id delivery**: the hub has no client-invocable methods (§1), so the id is handed over as a server-published envelope addressed to the just-connected socket:
   `{ "type": "connection_registered", "connection_id": "<uuidv7>", "socket_id": "<transport id>", "instance_tagged": <bool>, "superseded": <n>, "from": "server", "sent_at": … }`
 * Stored membership is re-applied upon connect and on every reconnect. App backends do not need to re-add members after client reconnects.

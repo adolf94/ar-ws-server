@@ -33,7 +33,7 @@ app backend (publisher) ─────► POST /api/publish (IdP Bearer + publi
 * **Connect-time group placement**:
   * Connections automatically join `user_channel|{sub}` (a global channel reachable regardless of `client_id` via `POST /api/users/{sub}/send`).
   * Connections join all partition-scoped groups the identity belongs to. Membership is persisted server-side and re-applied on reconnect.
-* **Stable addressing (v1.1, opt-in)**: pass `?instance=<tag>` on the hub URL — a client-generated UUID kept in localStorage / process env. The server then binds the socket to a server-minted logical `connection_id` that is delivered to that socket in a server-published `connection_registered` event. The same tag on every reconnect re-binds to the SAME id; the tag is not security-relevant (identity stays fenced by the connection JWT — CONTRACT §2.2). Without a tag the socket gets legacy per-socket semantics (fresh id every reconnect).
+* **Stable addressing (v1.1, opt-in)**: pass `?instance=<tag>` on the hub URL — a client-generated UUID kept in localStorage / process env. The same tag on every reconnect re-binds the socket to the SAME server-minted logical `connection_id` (addressing model and tag rules: CONTRACT §2.2). Without a tag the socket gets legacy per-socket semantics (fresh id every reconnect).
 * The connection JWT is verified only during the handshake. Existing connections stay alive past token expiry; expiry only affects subsequent reconnects.
 * **Identity and fan-out isolation**:
   * User identity and group names are partitioned by the token's `client_id`. Identical user IDs or group names across different services remain completely isolated.
@@ -100,7 +100,7 @@ Missing or invalid token returns `401 {"error":"invalid_token"}`.
 
 **Step 2 — Connect:**
 
-The client establishes a WebSocket connection to `/realtime/hub?id=<connectionToken>` — append `&instance=<tag>` here to opt into the v1.1 stable logical id (client-generated UUID; see §2). The client appends `?access_token=<connection JWT>` (or provides `Authorization: Bearer <connection JWT>` for native transports). Once the SignalR handshake frame (`{"protocol":"json","version":1}`) completes, the connection is active. Clients only receive `"event"` methods and cannot invoke hub methods; the logical id is handed over as the first server-published envelope on the socket: `{ type: "connection_registered", connection_id: "<uuidv7>", socket_id, instance_tagged, superseded, from: "server", sent_at }` (CONTRACT §5).
+The client establishes a WebSocket connection to `/realtime/hub?id=<connectionToken>` — append `&instance=<tag>` here to opt into the v1.1 stable logical id (client-generated UUID; see §2). The client appends `?access_token=<connection JWT>` (or provides `Authorization: Bearer <connection JWT>` for native transports). Once the SignalR handshake frame (`{"protocol":"json","version":1}`) completes, the connection is active. Clients only receive `"event"` methods and cannot invoke hub methods; the logical id is handed over as the first server-published event on the socket — `connection_registered` (exact envelope: CONTRACT §5) — read `connection_id` from it.
 
 **Reconnects**: Always initiate a new negotiate call. Never cache connection JWTs across reconnect attempts.
 
@@ -122,7 +122,7 @@ All write requests require: `Authorization: Bearer <IdP token>` with the publish
 | Add member | `POST /api/groups/{g}/members` `{ user_id }` | Partition-scoped (applies live + persists) |
 | Remove member | `DELETE /api/groups/{g}/members?user_id=…` | Partition-scoped (evicts live sockets) |
 | Send to user | `POST /api/users/{sub}/send` `{ data }` | **Global** across all active connections for `sub` |
-| Send to connection | `POST /api/connections/{id}/send` `{ data }` | Partition-scoped; `id` = the logical `connection_id` from `connection_registered` — fans to every bound socket, `delivered` count returned; 404 → fall back to the user lane |
+| Send to connection | `POST /api/connections/{id}/send` `{ data }` | Partition-scoped; `id` = the logical `connection_id` from `connection_registered` — fans to every bound socket (see Fan-Out Semantics) |
 | Disconnect socket | `POST /api/connections/{id}/disconnect` | Partition-scoped; aborts ALL sockets bound to the logical id (`aborted` = count); foreign connection returns 403 |
 | Group presence | `GET /api/groups/{g}/presence` | Partition-scoped (`user_id`, `client_id`, `online`, `connections`) |
 | Group history | `GET /api/groups/{g}/history?limit=` | Partition-scoped (returns buffered events) |
@@ -145,7 +145,7 @@ All write requests require: `Authorization: Bearer <IdP token>` with the publish
 ### 4.3 · Event Envelopes
 
 * Set payload type in `data.type`. The server automatically stamps `from` (caller `client_id`) and `sent_at` (RFC 3339 UTC).
-* Coalesced flushes (publisher SDKs, §4.4) ride one envelope with a `batch` array — CONTRACT §3.1: `{ "type": <stream type>, "batch": [chunk…verbatim], "batch_v": 1 }`. The outer `type` is pinned from the handle's first chunk. The server treats it as ONE event: one stamp, one rate-limit unit, one history row.
+* Coalesced flushes (publisher SDKs, §4.4) ride one envelope with a `batch` array — full wire shape and semantics: CONTRACT §3.1. The server treats one flush as ONE event: one stamp, one rate-limit unit, one history row.
 * Standard errors: `400` (validation), `401` (invalid token), `403` (missing scope or wrong partition), `404` (unknown group or socket).
 * Publishing to an unknown or empty group succeeds with `200 ok` and delivers to zero subscribers.
 
@@ -158,7 +158,7 @@ Rate limits use a fixed window per `client_id` (`RATE_WINDOW_SECONDS`, default 6
 When tripped:
 * Returns `429 { "error": "rate_limited", "detail": "…" }` with a `Retry-After` header indicating seconds until reset.
 * **For streaming workloads, use the publisher SDKs' coalesced send** rather than hand-rolled batching (semantics identical in both SDKs):
-  * python (`ar-realtime-client`, clients/python): `RealtimePublisher.coalesced_send_to_user(sub)` or `coalesced_send_to_connection(id)` (both keyword `max_pending_chars=64_000`) → `CoalescedSendHandle`. The connection-lane target is the logical `connection_id` from `connection_registered` — with the `?instance=` tag it survives tab reconnects; a 404 takes the drop path (see below) and the sender falls back to the user lane.
+  * python (`ar-realtime-client`, clients/python): `RealtimePublisher.coalesced_send_to_user(sub)` or `coalesced_send_to_connection(id)` (both keyword `max_pending_chars=64_000`) → `CoalescedSendHandle`. The connection-lane target is the logical `connection_id` from `connection_registered`; with the `?instance=` tag it is stable across tab reconnects, and a 404 just takes the SDK drop path (below).
   * .NET (`Ar.Realtime.Client`, clients/dotnet): `CoalescedSendToUser(sub, CoalesceOptions?)` or `CoalescedSendToConnection(id, CoalesceOptions?)`, `CoalesceOptions.MaxPendingChars = 64_000` → `ICoalescedSendHandle`. Same targeting rule for the connection lane.
   * `offer()` / `Offer()` is validate + enqueue only — never blocks the producer hot path (validated against CONTRACT §3: `data.type` must be a string).
   * Single-flight: at most ONE in-flight publish per handle; chunks offered while a request is in flight ride the NEXT flush, which fires the instant the response lands — batches self-tune to `generation_rate × RTT`, offer order is strictly preserved.
